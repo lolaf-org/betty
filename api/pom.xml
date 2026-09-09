@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.lolaf.betty</groupId>
+        <artifactId>betty-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>betty-api</artifactId>
+
+    <name>Betty Async I/O API</name>
+    <description>
+        The abstractions an application writes against: Client and Server with their builders, IOSession, IOWorker
+        and IOWorkersGroup, the IOEventsListener callbacks, the buffer pool, SSL and I/O settings, select strategies
+        and I/O statistics. Contains no networking code - depend on betty-impl as well to get a running stack.
+    </description>
+
+    <properties>
+        <automatic.module.name>org.lolaf.betty.api</automatic.module.name>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.lolaf.ringos</groupId>
+            <artifactId>ringos-lib-api</artifactId>
+            <version>${ringos.version}</version>
+        </dependency>
+    </dependencies>
+</project>

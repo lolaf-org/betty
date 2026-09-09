@@ -1,0 +1,172 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      releaseVersion:
+        description: 'Version to release, without a leading v (e.g. 0.1.0). Ignored when performOnly.'
+        required: false
+        type: string
+      developmentVersion:
+        description: 'Version to leave main on afterwards (e.g. 0.2.0-SNAPSHOT). Ignored when performOnly.'
+        required: false
+        type: string
+      dryRun:
+        description: 'Rehearse: build and verify only - no commit, no tag, no push, no upload'
+        required: false
+        default: false
+        type: boolean
+      # Recovery, not routine. If prepare pushed and perform then failed, the tag is real and only the
+      # deployment is missing
+      performOnly:
+        description: 'Skip prepare and deploy an existing tag (set tag below)'
+        required: false
+        default: false
+        type: boolean
+      tag:
+        description: 'Tag to deploy when performOnly (e.g. v0.1.0)'
+        required: false
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # `token` is what makes this workflow able to release at all: it writes the
+      # http.https://github.com/.extraheader credential into the checkout's git config, which is what
+      # maven-release-plugin's `git push` then authenticates with. main requires the `build` check and
+      # nothing has run it on a commit that does not exist yet, so the push only lands because that token
+      # acts as a repository admin and enforce_admins is off. Proven on ringos before its first release;
+      # a fine-grained token behaves the same here, so it is not proven again.
+      #
+      # fetch-depth: 0 because a push from a shallow clone is refused.
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Check the changelog has a section for this version
+        id: changelog
+        run: |
+          if [ "${{ inputs.performOnly }}" = "true" ]; then
+            version="${{ inputs.tag }}"
+            version="${version#v}"
+          else
+            version="${{ inputs.releaseVersion }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## /         { exit }
+            found && /^\[[^]]+\]:/  { exit }
+            found                   { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## [$version]' section. Write one, with its [$version]: link definition, and commit it before releasing."
+            exit 1
+          fi
+          echo "--- release notes for $version ---"
+          cat /tmp/release-notes.md
+
+      # One JDK, unlike ringos, which provisions three before this step to write a toolchains.xml.
+      # No betty module declares a toolchain, so there is nothing for a second JDK to serve.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_TOKEN_USERNAME
+          server-password: CENTRAL_TOKEN_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Configure the gpg agent and prove signing works
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEYNAME: ${{ secrets.GPG_KEYNAME }}
+        run: |
+          if [ -z "$GPG_KEYNAME" ]; then
+            echo "::error::The GPG_KEYNAME secret is empty. It is what becomes -Dgpg.keyname on the deploy below; without it gpg would quietly sign with whatever its default key is."
+            exit 1
+          fi
+          {
+            echo "allow-loopback-pinentry"
+            echo "default-cache-ttl 7200"
+            echo "max-cache-ttl 7200"
+          } >> "$GNUPGHOME/gpg-agent.conf"
+          gpg-connect-agent reloadagent /bye
+
+          echo "betty release signing probe" > /tmp/sign-probe.txt
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$MAVEN_GPG_PASSPHRASE" \
+              --local-user "$GPG_KEYNAME" \
+              --armor --detach-sign --output /tmp/sign-probe.asc /tmp/sign-probe.txt
+          gpg --verify /tmp/sign-probe.asc /tmp/sign-probe.txt
+          rm -f /tmp/sign-probe.txt /tmp/sign-probe.asc
+          echo "signing works, and the agent now holds the passphrase"
+
+      - name: Identify the release commits
+        run: |
+          git config user.name "betty release"
+          git config user.email "admin@lolaf.org"
+
+      - name: Prepare the release
+        if: ${{ !inputs.performOnly }}
+        run: |
+          mvn -B release:prepare \
+            -DreleaseVersion=${{ inputs.releaseVersion }} \
+            -DdevelopmentVersion=${{ inputs.developmentVersion }} \
+            -DdryRun=${{ inputs.dryRun }}
+
+      - name: Build, sign and upload the tag to the Portal
+        if: ${{ !inputs.dryRun }}
+        env:
+          CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEYNAME: ${{ secrets.GPG_KEYNAME }}
+        run: |
+          if [ "${{ inputs.performOnly }}" = "true" ]; then
+            {
+              echo "completedPhase=end-release"
+              echo "scm.url=scm:git:https://github.com/lolaf-org/betty.git"
+              echo "scm.tag=${{ inputs.tag }}"
+            } > release.properties
+            echo "--- release.properties ---"
+            cat release.properties
+          fi
+          mvn -B release:perform -Drelease.extraArguments="-DskipTests -Dgpg.keyname=$GPG_KEYNAME"
+
+      - name: Create the GitHub Release
+        if: ${{ !inputs.dryRun }}
+        env:
+          GH_TOKEN: ${{ secrets.CI_GITHUB_TOKEN }}
+        run: |
+          if [ "${{ inputs.performOnly }}" = "true" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="v${{ inputs.releaseVersion }}"
+          fi
+          gh release create "$tag" \
+            --title "betty ${{ steps.changelog.outputs.version }}" \
+            --notes-file /tmp/release-notes.md \
+            --verify-tag
+
+      - name: Upload surefire reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          retention-days: 7
+          if-no-files-found: ignore

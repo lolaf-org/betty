@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.lolaf.betty</groupId>
+        <artifactId>betty-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>betty-module-path-test</artifactId>
+
+    <name>Betty Module Path Test</name>
+    <description>
+        Proves the published betty jars are usable on the module path and not only the classpath. It exists as a
+        module of its own because the check needs to see betty-api and betty-impl together as real jars, and no
+        other module does: betty-impl cannot resolve itself as a dependency, and the benchmarks module is a JMH
+        harness whose job is not correctness. Nothing is published from here.
+    </description>
+
+    <properties>
+        <!-- No main sources, so nothing carries a module name of its own. The parent's sentinel would
+             be shipped in the empty jar's manifest; it is never read, since this artifact is not
+             published and never reaches a module path itself. -->
+        <automatic.module.name>org.lolaf.betty.modulepathtest</automatic.module.name>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.lolaf.betty</groupId>
+            <artifactId>betty-api</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.lolaf.betty</groupId>
+            <artifactId>betty-impl</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- The test needs the betty artifacts as real jars. Resolved dependencies are jars during
+                 `mvn install` but exploded target/classes directories during a bare `mvn test`, and
+                 ModuleFinder would derive the module name "classes" from every one of them - so copy
+                 them somewhere the test can rely on rather than reading the classpath. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>${maven-dependency-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>collect-betty-jars-for-the-module-path</id>
+                        <phase>process-test-classes</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/module-path</outputDirectory>
+                            <includeGroupIds>org.lolaf.betty</includeGroupIds>
+                            <includeScope>test</includeScope>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <betty.module.path>${project.build.directory}/module-path</betty.module.path>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

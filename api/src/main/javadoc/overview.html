@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><title>Betty</title></head>
+<body>
+
+<p>Asynchronous NIO networking for Java that must not allocate or block on its hot path: selector-driven IO workers
+    sessions are balanced across, pooled buffers so a read or a write allocates nothing, TLS driven by readiness
+    rather than by blocking, and a choice of how a thread waits that decides where on the CPU-burn versus
+    wake-up-latency curve it sits.</p>
+
+<p>This is <code>betty-api</code>, and it holds no networking code. An application compiles against it and puts
+    <code>betty-impl</code> on the runtime classpath; the two meet at
+    {@link org.lolaf.betty.api.settings.InstanceProvider}, which builds what a settings object describes by finding
+    the implementation through {@code ServiceLoader}.</p>
+
+<p>Start at {@link org.lolaf.betty.api.ClientBuilder} or {@link org.lolaf.betty.api.ServerBuilder} for how an
+    instance is described, {@link org.lolaf.betty.api.io.IOEventsListener} for everything an application is told,
+    and {@link org.lolaf.betty.api.io.IOSession} for everything it can do with a connection.</p>
+
+<p>Two contracts are worth reading before writing a callback, because neither is visible in a signature: the
+    {@code ByteBuffer} handed to {@code onRead} belongs to the pool and is recycled the moment the callback returns,
+    and every callback runs on the IO thread that owns the session, so what a callback does is what that thread
+    costs.</p>
+
+</body>
+</html>

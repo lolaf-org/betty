@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.lolaf.betty</groupId>
+        <artifactId>betty-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>betty-impl</artifactId>
+
+    <name>Betty Async I/O Implementation</name>
+    <description>
+        The NIO implementation of the betty-api abstractions: selector-driven IO workers, pooled buffers, SSL
+        handshaking, load balancing of sessions across workers, and pluggable select strategies. Depend on this
+        alongside betty-api; nothing here is meant to be referenced directly.
+    </description>
+
+    <properties>
+        <automatic.module.name>org.lolaf.betty.impl</automatic.module.name>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.lolaf.betty</groupId>
+            <artifactId>betty-api</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Used directly - 129 references between them in this module's bytecode - and previously
+             reaching it only transitively through betty-api. -->
+        <dependency>
+            <groupId>org.lolaf.ringos</groupId>
+            <artifactId>ringos-lib-api</artifactId>
+            <version>${ringos.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.lolaf.ringos</groupId>
+            <artifactId>ringos-unsafe-operations-api</artifactId>
+            <version>${ringos.version}</version>
+        </dependency>
+        <!-- runtime, not compile: these two aggregators carry no classes at all, only a dependency
+             set that puts the right JDK-range implementation on the runtime classpath for the
+             ServiceLoader to find. Nothing here compiles against them, and a consumer should not
+             either. -->
+        <dependency>
+            <groupId>org.lolaf.ringos</groupId>
+            <artifactId>ringos-unsafe-operations-impl-all</artifactId>
+            <version>${ringos.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.lolaf.ringos</groupId>
+            <artifactId>ringos-lib-impl-all</artifactId>
+            <version>${ringos.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+</project>

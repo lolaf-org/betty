@@ -1,0 +1,43 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+# A superseded run on a pull request is not worth runner minutes, but every commit landing on main gets verified.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # betty builds and tests in about a minute locally; the ceiling is for a cold runner, not the work.
+    # The tests open real sockets against localhost, so they are slower on a shared runner than the
+    # module count suggests.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # One JDK, unlike ringos, which provisions three. Nothing in betty reaches a java.base internal at
+      # compile time, so no module declares a toolchain and maven.compiler.release=11 covers the whole
+      # reactor. If a module ever does need one, this is where its JDK gets listed.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+          cache: maven
+
+      - name: Build and test
+        run: mvn -B -T 1C clean install
+
+      - name: Upload surefire reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          retention-days: 7
+          if-no-files-found: ignore
