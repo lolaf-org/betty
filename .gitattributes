@@ -1,0 +1,5 @@
+# Line endings are decided here rather than by each contributor's core.autocrlf, so a clone is identical everywhere.
+* text=auto
+*.cmd text eol=crlf
+*.sh text eol=lf
+mvnw text eol=lf
