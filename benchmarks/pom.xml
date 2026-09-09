@@ -44,17 +44,17 @@
         <dependency>
             <groupId>io.aeron</groupId>
             <artifactId>aeron-client</artifactId>
-            <version>1.52.2</version>
+            <version>1.53.0</version>
         </dependency>
         <dependency>
             <groupId>io.aeron</groupId>
             <artifactId>aeron-driver</artifactId>
-            <version>1.52.2</version>
+            <version>1.53.0</version>
         </dependency>
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-client</artifactId>
-            <version>12.1.12</version>
+            <version>12.1.13</version>
         </dependency>
         <dependency>
             <groupId>org.apache.mina</groupId>
