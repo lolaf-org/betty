@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in betty behaves differently from what it documents
+labels: [ bug ]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        How a session waits, which worker it landed on and whether it is secure decide most of betty's
+        behaviour, so the details below are usually what separates "a bug" from "a different configuration
+        than you think".
+
+  - type: input
+    id: version
+    attributes:
+      label: Betty version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: jdk
+    attributes:
+      label: JDK
+      description: Vendor and full version, as `java -version` prints it.
+      placeholder: "Zulu 21.0.12"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      description: Say if it is Linux - `NapIdLoadBalancer` reads a socket option that exists nowhere else.
+      placeholder: "Ubuntu 24.04, x86-64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: flags
+    attributes:
+      label: JVM flags
+      description: >
+        The whole command line if you can, including `--add-opens java.base/sun.nio.ch=ALL-UNNAMED` and
+        anything setting `java.nio.channels.spi.SelectorProvider`.
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Session configuration
+      description: >
+        The select strategy, the load balancer, the IO thread groups and their counts, the write buffer
+        pool zones, and whether the session is plain or TLS. The relevant part of your builder is ideal.
+      render: java
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: >
+        The smallest code that shows it, client and server. A failing test against `betty-impl` is ideal.
+        Say whether it reproduces every time or occasionally - a race on the IO thread and a logic error
+        need different reading.
+      render: java

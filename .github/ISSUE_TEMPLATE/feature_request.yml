@@ -1,0 +1,25 @@
+name: Feature request
+description: Something betty should be able to do and cannot
+labels: [ enhancement ]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The problem, not the solution - the shape of the workload usually decides the answer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What betty makes you do today
+      description: Including the workaround you are using, if there is one.
+
+  - type: textarea
+    id: hotpath
+    attributes:
+      label: Is this on the IO path
+      description: >
+        Betty will not put work in a read or write callback for a feature that only some callers need.
+        If this belongs there, say what it would cost and why it is worth it.
