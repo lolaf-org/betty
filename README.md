@@ -14,6 +14,56 @@ strategies that let you choose where on the CPU-burn / wake-up-latency curve you
   primitives, and on SLF4J. Nothing else.
 - **Apache License 2.0.**
 
+## Why it exists
+
+Betty comes out of designing low-latency systems in finance, where the transport is TCP, the latency target and the
+throughput target are both real numbers somebody signed up to, and the way you hit them is by tuning: how the
+selector waits for readiness, which core a session is served on, how much of the machine you are willing to burn to
+take a microsecond off. Two libraries dominate that space and neither leaves those dials where you can reach them.
+
+**Netty** is very good, and it is what most of this industry runs on. But its NIO transport will not busy-spin a
+selector — the [parameter matrix](benchmarks/README.md) cannot even run Netty in `LOW_LATENCY`, because there is no
+such configuration to run — so you block in `select()` and pay the wake-up on every cross-thread write, and you
+allocate about 430 B per round trip, which is a young collection on a schedule and a tail latency you did not
+choose. **Aeron** is excellent, and on this run it is the only client that beats betty on latency. But it is not
+TCP: it puts its own reliable delivery over UDP, so adopting it means adopting its protocol, its media driver and
+its operational model at both ends of every link — and its 7.37 µs costs 473 B/op and a core it does not give back.
+Neither of them is wrong. They are simply not a TCP framework you can tune.
+
+There is another tier below all of this — a specific network adapter and a kernel-bypass stack, DPDK, TCP moved into
+userspace — and it does go lower. What it costs is being stock: a NIC you have to specify, a driver and a stack to
+install, tune and operate, and a deployment that no longer runs unchanged on whatever machine the JVM lands on. That
+is a decision about the whole system, not about a library, and plenty of desks are right to take it. Betty stops
+deliberately on this side of that line: it is for getting every microsecond and every message you can out of a
+standard JVM talking to its host OS's TCP stack, on hardware nobody had to requisition. The heavy artillery stays
+where it is, for the day this is genuinely not enough.
+
+So that is what betty is. Plain NIO over TCP; a busy-spinning selector when a session deserves one and a blocking
+one when it does not, chosen per thread group rather than per process, because the sessions that matter are usually
+a handful and the rest should give the core back. On this run, over loopback with 16-byte packets, that dial prices
+out at about 3 µs of round-trip against 1.3 Mops/s — betty at 11.70 µs and 24.52 Mops/s blocking in `select()`,
+8.64 µs and 25.78 Mops/s busy-spinning. The microseconds are what the wake-up costs locally and do not shrink over
+a real NIC; they just sit inside a larger total.
+
+And close to nothing allocated while it runs: 0.10 B per round trip, 0.00035 B per message on the throughput
+benchmark, against 166–632 B/op for Netty, Mina, Jetty and the JDK's own async API. That number matters out of all
+proportion to its size. Allocating is not itself slow — it is a pointer bump — but everything allocated is
+eventually collected, and a collection is a pause you did not schedule, cannot tune away after the fact, and will
+meet again at the far end of the distribution you are actually judged on. A hot path that allocates nothing does not
+fill Eden, and a young collection that never runs costs nothing. It also means that when you go through the GC log
+looking for what is filling the heap, for once it is not the networking library.
+
+Everything else in the API follows from those two commitments: a receive timestamp handed to `onRead`, `IOStats`
+hooks that timestamp every hop so a latency budget can be attributed rather than guessed at, and a load balancer
+that reads the NIC's `SO_INCOMING_NAPI_ID` to keep a session on the CPU the kernel is already steering its packets
+to.
+
+The bar it had to clear was never Netty, though. It was the hand-rolled selector loop that every shop with a latency
+budget ends up writing, and then owning forever. [The benchmarks](#benchmarks) say it clears it: round-trip level
+with a hand-rolled busy-spinning NIO client, throughput ahead of it, at a fraction of a byte per operation. Betty is
+the transport half of a pair — [ringos](https://github.com/lolaf-org/ringos) is the other, and holds the ring
+buffers, idle strategies and threading primitives both of them stand on.
+
 ## The two artifacts
 
 | Module | What it gives you |
@@ -59,10 +109,10 @@ Client client = ClientBuilder.builder()
             message.position(message.limit());
         })
         .ioSettings(IOSettings.builder()
-                .tasksRingBufferSize(16 * 1024)
+                .tasksRingBufferSize(2 * 1024)
                 .writeIoBufferPoolSettings(IOBufferPoolSettings.builder()
                         .zone(IOBufferPoolSettings.IOBufferPoolZone.builder()
-                                .poolSize(8192)
+                                .poolSize(2 * 1024)
                                 .bufferSize(1024)
                                 .build())
                         .build())
