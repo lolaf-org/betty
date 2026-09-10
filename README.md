@@ -83,6 +83,30 @@ interface rather than passing a lambda when you want them.
 The `ByteBuffer` handed to `onRead` belongs to the pool and is recycled the moment the callback returns. Read what you
 need inside the callback, or copy it. Retaining one is the one mistake that will bite you.
 
+## Examples
+
+`betty-examples` holds the compiling, running form of the snippet above:
+[`PingPongExample`](examples/src/main/java/org/lolaf/betty/examples/ping/PingPongExample.java) starts a betty client
+and a betty server in one JVM and bounces a 16-byte ping between them once a second. It is not published.
+
+```bash
+./mvnw -T 1C clean install     # from the repository root
+java -jar examples/target/ping-example.jar
+```
+
+```text
+22:02:52.078 [IO-worker-ping-client-0] INFO PingPongExample - connected to localhost/127.0.0.1:9099
+22:02:52.078 [IO-worker-ping-server-0] INFO PingPongExample - client connected from /127.0.0.1:44054
+22:02:53.069 [IO-worker-ping-client-0] INFO PingPongExample - pong seq=1 rtt=2604us
+22:02:54.066 [IO-worker-ping-client-0] INFO PingPongExample - pong seq=2 rtt=228us
+```
+
+Everything not needed to show a round trip is left at its default. What it does show is the buffer contract above,
+the framing loop `while (message.remaining() >= FRAME_SIZE)` — betty compacts a trailing partial frame into the
+front of the next read, so you never buffer one yourself — and the fact that the one-second wait belongs on a
+scheduler rather than inside a callback, because an IO thread that sleeps stops serving every other session on that
+worker. [`examples/README.md`](examples/README.md) has the detail.
+
 ## Choosing a select strategy
 
 `SelectStrategy` decides how a worker waits for readiness, and it is the main latency/CPU dial:
@@ -127,8 +151,27 @@ The build also gates on things worth knowing about before you send a change:
 
 ## Benchmarks
 
-`betty-benchmarks` holds JMH comparisons against Aeron, Netty, Jetty and Mina. It is not published.
+`betty-benchmarks` holds JMH comparisons against Aeron, Netty, Jetty and Mina, plus two hand-written NIO clients as
+the floor a library has to beat to be worth using. It is not published.
 
 ```bash
-./mvnw -T 1C clean install && java -jar benchmarks/target/benchmarks.jar
+./mvnw -T 1C clean install     # from the repository root
+cd benchmarks && ./run-benchmark.sh
 ```
+
+On the 2026-09-10 run — 16-byte packets over loopback, one machine, one fork — betty's round-trip latency is level
+with a hand-rolled busy-spinning NIO client (8.64 µs against 8.60, inside both error bars) and ahead of both
+hand-rolled clients on throughput by more than their intervals overlap. It is ahead of Netty, Mina, Jetty and the
+JDK's own `AsynchronousSocketChannel` on latency, and behind Aeron on latency in the one configuration Aeron is
+tuned for — while staying ahead of Aeron on throughput in both. Jetty on both benchmarks, Mina on throughput and the
+JDK client on round-trip carry error bars as wide as their own scores, so their placement is unresolved. The gap
+that is not close is allocation: 0.10 B/op per round-trip against 166–632 B/op for Netty, Mina, Jetty, the JDK
+client and Aeron in the configuration Aeron is quickest in — which is the whole point of the buffer pooling.
+
+**Those numbers are one machine, and both benchmarks pin threads to cores derived from `availableProcessors()`, so
+two machines are not comparable.** Run them on your own hardware before believing any of it.
+
+[`benchmarks/README.md`](benchmarks/README.md) has the full tables, what each number does and does not support, the
+parameter matrix, which client supports which combination, and why running the whole jar at once logs errors by
+design. The raw JSON of every run is in [`benchmarks/results/`](benchmarks/results); drop a file on
+<https://jmh.morethan.io/> to read it.

@@ -115,7 +115,9 @@ public class AeronClient extends AbstractClientBenchmark {
 
     @Override
     public void setupServer() {
-        aeronServer = Aeron.connect(new Aeron.Context().aeronDirectoryName(serverDriver.aeronDirectoryName()));
+        aeronServer = Aeron.connect(new Aeron.Context()
+                .aeronDirectoryName(serverDriver.aeronDirectoryName())
+                .errorHandler(t -> log.warn("Aeron server error after shutdown: {}", t.getMessage())));
         Server.ResponseHandler responseHandler = (buffer, offset, length, header, responsePublication) -> {
             long systemTime = buffer.getLong(offset);
             long sequence = buffer.getLong(offset + 8);
@@ -131,7 +133,9 @@ public class AeronClient extends AbstractClientBenchmark {
 
     @Override
     public void setupClient(ClientSettings clientSettings) {
-        aeronClient = Aeron.connect(new Aeron.Context().aeronDirectoryName(clientDriver.aeronDirectoryName()));
+        aeronClient = Aeron.connect(new Aeron.Context()
+                .aeronDirectoryName(clientDriver.aeronDirectoryName())
+                .errorHandler(t -> log.warn("Aeron client error after shutdown: {}", t.getMessage())));
 
         final ControlledFragmentHandler recvHandler = new ControlledFragmentAssembler((buffer, offset, length, header) -> {
             for (int i = offset; i < offset + length; i += 16) {
@@ -197,9 +201,11 @@ public class AeronClient extends AbstractClientBenchmark {
     public void shutdownServer() throws IOException {
         serverRunner.close();
         server.close();
+        // the Aeron client owns a conductor thread of its own: close it before the driver it talks to, or the
+        // conductor sees the driver vanish and the default error handler kills the JMH fork
+        CloseHelper.quietClose(aeronServer);
         serverDriver.close();
         deleteDir(new File(serverDriver.aeronDirectoryName()));
-
     }
 
 
@@ -207,6 +213,7 @@ public class AeronClient extends AbstractClientBenchmark {
     public void shutdownClient() throws IOException {
         clientRunner.close();
         client.close();
+        CloseHelper.quietClose(aeronClient);
         clientDriver.close();
         deleteDir(new File(clientDriver.aeronDirectoryName()));
     }

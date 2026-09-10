@@ -106,6 +106,7 @@
         <module>api</module>
         <module>impl</module>
         <module>benchmarks</module>
+        <module>examples</module>
         <module>module-path-test</module>
     </modules>
 
@@ -488,6 +489,7 @@
                             <!-- maven.deploy.skip is a maven-deploy-plugin property, and this plugin replaces that plugin -->
                             <excludeArtifacts>
                                 <excludeArtifact>betty-benchmarks</excludeArtifact>
+                                <excludeArtifact>betty-examples</excludeArtifact>
                                 <excludeArtifact>betty-module-path-test</excludeArtifact>
                             </excludeArtifacts>
                         </configuration>
