@@ -24,13 +24,24 @@ import org.mockito.Mockito;
 import java.io.IOException;
 import java.nio.channels.NetworkChannel;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 
 class NapIdLoadBalancerTest {
 
+    /**
+     * The balancer's slot registry is shared by every test in the JVM, so each test uses NAPI IDs nobody
+     * else has seen. They start above {@code NR_CPUS} the way the kernel's do.
+     */
+    private static final AtomicInteger NEXT_NAPID = new AtomicInteger(8193);
+
     private final NapIdLoadBalancer lb = NapIdLoadBalancer.getInstance();
+
+    private static int freshNapId() {
+        return NEXT_NAPID.getAndIncrement();
+    }
 
     private static NetworkChannel channelWithNapId(int napId) throws IOException {
         NetworkChannel channel = Mockito.mock(NetworkChannel.class);
@@ -61,6 +72,12 @@ class NapIdLoadBalancerTest {
         return w;
     }
 
+    private static void hostSessions(IOWorker worker, IOSession... sessions) {
+        List<IOSession> snapshot = List.of(sessions);
+        Mockito.when(worker.getRegisteredSessionsCount()).thenReturn(sessions.length);
+        Mockito.when(worker.getRegisteredSessions()).thenReturn(snapshot);
+    }
+
     @Test
     void getInstanceReturnsSingleton() {
         assertThat(NapIdLoadBalancer.getInstance()).isSameAs(NapIdLoadBalancer.getInstance());
@@ -72,16 +89,42 @@ class NapIdLoadBalancerTest {
     }
 
     @Test
-    void selectIOWorkerMapsNapiIdToZeroIndexedWorker() throws IOException {
-        IOWorker w0 = workerWithCount("w0", 5);
-        IOWorker w1 = workerWithCount("w1", 5);
-        IOWorker w2 = workerWithCount("w2", 5);
-        NetworkChannel channel = channelWithNapId(2);
+    void selectIOWorkerKeepsOneNapiIdOnOneWorker() throws IOException {
+        IOWorker[] workers = {workerWithCount("w0", 5), workerWithCount("w1", 5), workerWithCount("w2", 5)};
+        int napId = freshNapId();
 
-        IOWorker selected = lb.selectIOWorker(channel, new IOWorker[]{w0, w1, w2});
+        IOWorker first = lb.selectIOWorker(channelWithNapId(napId), workers);
+        IOWorker second = lb.selectIOWorker(channelWithNapId(napId), workers);
 
-        // napId 2 → workers[1]
-        assertThat(selected).isSameAs(w1);
+        assertThat(second).isSameAs(first);
+    }
+
+    @Test
+    void selectIOWorkerSpreadsDistinctNapiIdsOverWorkers() throws IOException {
+        IOWorker[] workers = {workerWithCount("w0", 5), workerWithCount("w1", 5), workerWithCount("w2", 5)};
+
+        IOWorker a = lb.selectIOWorker(channelWithNapId(freshNapId()), workers);
+        IOWorker b = lb.selectIOWorker(channelWithNapId(freshNapId()), workers);
+        IOWorker c = lb.selectIOWorker(channelWithNapId(freshNapId()), workers);
+
+        assertThat(List.of(a, b, c)).containsExactlyInAnyOrder(workers[0], workers[1], workers[2]);
+    }
+
+    @Test
+    void selectIOWorkerAcceptsKernelSizedNapiIds() throws IOException {
+        // A real NAPI ID is far larger than the worker count; it must still place by ID rather than fall
+        // back, which the changing session counts here would betray.
+        IOWorker w0 = workerWithCount("w0", 1);
+        IOWorker w1 = workerWithCount("w1", 9);
+        IOWorker[] workers = {w0, w1};
+        int napId = freshNapId();
+
+        IOWorker first = lb.selectIOWorker(channelWithNapId(napId), workers);
+        Mockito.when(w0.getRegisteredSessionsCount()).thenReturn(9);
+        Mockito.when(w1.getRegisteredSessionsCount()).thenReturn(1);
+        IOWorker second = lb.selectIOWorker(channelWithNapId(napId), workers);
+
+        assertThat(second).isSameAs(first);
     }
 
     @Test
@@ -98,18 +141,6 @@ class NapIdLoadBalancerTest {
     }
 
     @Test
-    void selectIOWorkerFallsBackWhenNapiIdIsOutOfRange() throws IOException {
-        IOWorker w0 = workerWithCount("w0", 1);
-        IOWorker w1 = workerWithCount("w1", 9);
-        // Only 2 workers but napId 5 → out of range → fallback to MinRegisteredSession.
-        NetworkChannel channel = channelWithNapId(5);
-
-        IOWorker selected = lb.selectIOWorker(channel, new IOWorker[]{w0, w1});
-
-        assertThat(selected).isSameAs(w0);
-    }
-
-    @Test
     void selectIOWorkerFallsBackWhenGetOptionThrows() throws IOException {
         IOWorker w0 = workerWithCount("w0", 1);
         IOWorker w1 = workerWithCount("w1", 9);
@@ -123,24 +154,32 @@ class NapIdLoadBalancerTest {
 
     @Test
     void rebalanceEmitsMoveWhenNapiIdDisagreesWithCurrentPlacement() throws IOException {
-        IOSession misplaced = sessionWithNapId(2);          // wants workers[1]
-        IOWorker w0 = workerWithSessions("w0", misplaced);  // currently on workers[0]
+        IOWorker w0 = workerWithSessions("w0");
         IOWorker w1 = workerWithSessions("w1");
+        IOWorker[] workers = {w0, w1};
+        int napId = freshNapId();
+        IOWorker target = lb.selectIOWorker(channelWithNapId(napId), workers);
+        IOWorker other = target == w0 ? w1 : w0;
+        IOSession misplaced = sessionWithNapId(napId);
+        hostSessions(other, misplaced);
 
-        List<IOWorkerLoadBalancer.SessionMove> moves = lb.rebalance(new IOWorker[]{w0, w1});
+        List<IOWorkerLoadBalancer.SessionMove> moves = lb.rebalance(workers);
 
         assertThat(moves).hasSize(1);
         assertThat(moves.get(0).getSession()).isSameAs(misplaced);
-        assertThat(moves.get(0).getTarget()).isSameAs(w1);
+        assertThat(moves.get(0).getTarget()).isSameAs(target);
     }
 
     @Test
     void rebalanceEmitsNoMoveWhenNapiIdMatchesCurrentPlacement() throws IOException {
-        IOSession wellPlaced = sessionWithNapId(1);          // wants workers[0]
-        IOWorker w0 = workerWithSessions("w0", wellPlaced);
+        IOWorker w0 = workerWithSessions("w0");
         IOWorker w1 = workerWithSessions("w1");
+        IOWorker[] workers = {w0, w1};
+        int napId = freshNapId();
+        IOWorker target = lb.selectIOWorker(channelWithNapId(napId), workers);
+        hostSessions(target, sessionWithNapId(napId));
 
-        assertThat(lb.rebalance(new IOWorker[]{w0, w1})).isEmpty();
+        assertThat(lb.rebalance(workers)).isEmpty();
     }
 
     @Test
@@ -176,20 +215,29 @@ class NapIdLoadBalancerTest {
 
     @Test
     void rebalanceEmitsMovesForMultipleMisplacedSessions() throws IOException {
-        IOSession s0to1 = sessionWithNapId(2);  // wants workers[1]
-        IOSession s1to0 = sessionWithNapId(1);  // wants workers[0]
-        IOWorker w0 = workerWithSessions("w0", s0to1);
-        IOWorker w1 = workerWithSessions("w1", s1to0);
+        IOWorker w0 = workerWithSessions("w0");
+        IOWorker w1 = workerWithSessions("w1");
+        IOWorker[] workers = {w0, w1};
+        int firstNapId = freshNapId();
+        int secondNapId = freshNapId();
+        IOWorker firstTarget = lb.selectIOWorker(channelWithNapId(firstNapId), workers);
+        IOWorker secondTarget = lb.selectIOWorker(channelWithNapId(secondNapId), workers);
+        // consecutive slots land on consecutive workers, so two fresh IDs never share one
+        assertThat(secondTarget).isNotSameAs(firstTarget);
+        IOSession first = sessionWithNapId(firstNapId);
+        IOSession second = sessionWithNapId(secondNapId);
+        hostSessions(firstTarget, second);
+        hostSessions(secondTarget, first);
 
-        List<IOWorkerLoadBalancer.SessionMove> moves = lb.rebalance(new IOWorker[]{w0, w1});
+        List<IOWorkerLoadBalancer.SessionMove> moves = lb.rebalance(workers);
 
         assertThat(moves).hasSize(2)
                 .anySatisfy(m -> {
-                    assertThat(m.getSession()).isSameAs(s0to1);
-                    assertThat(m.getTarget()).isSameAs(w1);
+                    assertThat(m.getSession()).isSameAs(first);
+                    assertThat(m.getTarget()).isSameAs(firstTarget);
                 }).anySatisfy(m -> {
-                    assertThat(m.getSession()).isSameAs(s1to0);
-                    assertThat(m.getTarget()).isSameAs(w0);
+                    assertThat(m.getSession()).isSameAs(second);
+                    assertThat(m.getTarget()).isSameAs(secondTarget);
                 });
     }
 }

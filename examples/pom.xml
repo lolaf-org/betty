@@ -54,6 +54,7 @@
                 <artifactId>maven-shade-plugin</artifactId>
                 <executions>
                     <execution>
+                        <id>ping-example</id>
                         <phase>package</phase>
                         <goals>
                             <goal>shade</goal>
@@ -65,6 +66,38 @@
                                 <transformer
                                         implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>org.lolaf.betty.examples.ping.PingPongExample</mainClass>
+                                    <manifestEntries>
+                                        <Add-Opens>java.base/jdk.internal.misc</Add-Opens>
+                                    </manifestEntries>
+                                </transformer>
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>napid-example</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <finalName>napid-example</finalName>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>org.lolaf.betty.examples.napid.NapIdExample</mainClass>
                                     <manifestEntries>
                                         <Add-Opens>java.base/jdk.internal.misc</Add-Opens>
                                     </manifestEntries>

@@ -20,9 +20,9 @@
  * They differ only in what they count: sessions
  * ({@link org.lolaf.betty.api.lb.MinRegisteredSessionLoadBalancer}, the default), measured thread load
  * ({@link org.lolaf.betty.api.lb.MinIOThreadLoadSessionLoadBalancer}), nothing at all
- * ({@link org.lolaf.betty.api.lb.DedicatedIOWorkerLoadBalancer}, one session per worker), or the NIC queue the
- * kernel already steered the packets to ({@link org.lolaf.betty.api.lb.NapIdLoadBalancer}, Linux only). Each is a
- * stateless singleton, so one instance serves every group in the JVM, and the other three fall back to the default
+ * ({@link org.lolaf.betty.api.lb.DedicatedIOWorkerLoadBalancer}, one session per worker), or the NIC RX queue the
+ * kernel delivered the packets on ({@link org.lolaf.betty.api.lb.NapIdLoadBalancer}, Linux only). Each is a
+ * singleton, so one instance serves every group in the JVM, and the other three fall back to the default
  * when what they count is unavailable - which is why choosing one is never a correctness decision.
  */
 package org.lolaf.betty.api.lb;

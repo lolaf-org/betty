@@ -43,8 +43,8 @@ import java.util.List;
  * <ul>
  *     <li>{@link MinRegisteredSessionLoadBalancer} — packs by registered-session count.</li>
  *     <li>{@link MinIOThreadLoadSessionLoadBalancer} — packs by EMA-tracked CPU load.</li>
- *     <li>{@link NapIdLoadBalancer} — pins sessions to the IO worker matching the NIC RX
- *         queue reported by {@code SO_INCOMING_NAPI_ID}.</li>
+ *     <li>{@link NapIdLoadBalancer} — groups the sessions sharing a NIC RX queue, as reported by
+ *         {@code SO_INCOMING_NAPI_ID}, onto one IO worker.</li>
  *     <li>{@link org.lolaf.betty.api.lb.DedicatedIOWorkerLoadBalancer} — one session per worker, falling back to
  *         {@link MinRegisteredSessionLoadBalancer} once there are more sessions than workers.</li>
  * </ul>

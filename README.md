@@ -16,53 +16,43 @@ strategies that let you choose where on the CPU-burn / wake-up-latency curve you
 
 ## Why it exists
 
-Betty comes out of designing low-latency systems in finance, where the transport is TCP, the latency target and the
-throughput target are both real numbers somebody signed up to, and the way you hit them is by tuning: how the
-selector waits for readiness, which core a session is served on, how much of the machine you are willing to burn to
-take a microsecond off. Two libraries dominate that space and neither leaves those dials where you can reach them.
+Betty comes out of low-latency work in finance: the transport is TCP, the latency and throughput targets are numbers
+somebody signed up to, and you hit them by tuning — how the selector waits for readiness, which core serves a session,
+how much of the machine you will burn to take a microsecond off. The two libraries that dominate that space do not
+leave those dials where you can reach them.
 
-**Netty** is very good, and it is what most of this industry runs on. But its NIO transport will not busy-spin a
-selector — the [parameter matrix](benchmarks/README.md) cannot even run Netty in `LOW_LATENCY`, because there is no
-such configuration to run — so you block in `select()` and pay the wake-up on every cross-thread write, and you
-allocate about 430 B per round trip, which is a young collection on a schedule and a tail latency you did not
-choose. **Aeron** is excellent, and on this run it is the only client that beats betty on latency. But it is not
-TCP: it puts its own reliable delivery over UDP, so adopting it means adopting its protocol, its media driver and
-its operational model at both ends of every link — and its 7.37 µs costs 473 B/op and a core it does not give back.
-Neither of them is wrong. They are simply not a TCP framework you can tune.
+**Netty** will not busy-spin a selector — the [parameter matrix](benchmarks/README.md) cannot even run it in
+`LOW_LATENCY`, because there is no such configuration — so you block in `select()`, pay the wake-up on every
+cross-thread write, and allocate about 430 B per round trip.
 
-There is another tier below all of this — a specific network adapter and a kernel-bypass stack, DPDK, TCP moved into
-userspace — and it does go lower. What it costs is being stock: a NIC you have to specify, a driver and a stack to
-install, tune and operate, and a deployment that no longer runs unchanged on whatever machine the JVM lands on. That
-is a decision about the whole system, not about a library, and plenty of desks are right to take it. Betty stops
-deliberately on this side of that line: it is for getting every microsecond and every message you can out of a
-standard JVM talking to its host OS's TCP stack, on hardware nobody had to requisition. The heavy artillery stays
-where it is, for the day this is genuinely not enough.
+**Aeron** is the only client here that beats betty on latency, at 7.37 µs, and that is exactly what you should expect:
+it is not TCP. It puts its own reliable delivery over UDP, so this is two different transports being compared, not two
+implementations of the same one. A connection is bidirectional the moment TCP gives it to you; in Aeron each direction
+is a separate publication and subscription you have to configure, address and operate, so a request/response link is
+two one-way streams you set up yourself. Adopting it means adopting that protocol, its media driver and its
+operational model at both ends of every link, for 473 B/op and a core it does not give back.
 
-So that is what betty is. Plain NIO over TCP; a busy-spinning selector when a session deserves one and a blocking
-one when it does not, chosen per thread group rather than per process, because the sessions that matter are usually
-a handful and the rest should give the core back. On this run, over loopback with 16-byte packets, that dial prices
-out at about 3 µs of round-trip against 1.3 Mops/s — betty at 11.70 µs and 24.52 Mops/s blocking in `select()`,
-8.64 µs and 25.78 Mops/s busy-spinning. The microseconds are what the wake-up costs locally and do not shrink over
-a real NIC; they just sit inside a larger total.
+Below both is kernel bypass — a NIC you have to specify, DPDK, TCP moved into userspace — which does go lower, and
+costs you being stock. Betty stops deliberately on this side of that line: a standard JVM, its host OS's TCP stack,
+hardware nobody had to requisition.
 
-And close to nothing allocated while it runs: 0.10 B per round trip, 0.00035 B per message on the throughput
-benchmark, against 166–632 B/op for Netty, Mina, Jetty and the JDK's own async API. That number matters out of all
-proportion to its size. Allocating is not itself slow — it is a pointer bump — but everything allocated is
-eventually collected, and a collection is a pause you did not schedule, cannot tune away after the fact, and will
-meet again at the far end of the distribution you are actually judged on. A hot path that allocates nothing does not
-fill Eden, and a young collection that never runs costs nothing. It also means that when you go through the GC log
-looking for what is filling the heap, for once it is not the networking library.
+What that buys, over loopback with 16-byte packets: 11.70 µs and 24.52 Mops/s blocking in `select()`, 8.64 µs and
+25.78 Mops/s busy-spinning — the strategy chosen per thread group rather than per process, so the handful of sessions
+that matter get a core and the rest give theirs back. And 0.10 B per round trip, 0.00035 B per message on the
+throughput benchmark, against 166–632 B/op for Netty, Mina, Jetty and the JDK's own async API. Allocating is not
+itself slow, but everything allocated is eventually collected, and a collection is a pause you did not schedule and
+will meet again at the far end of the distribution you are actually judged on.
 
-Everything else in the API follows from those two commitments: a receive timestamp handed to `onRead`, `IOStats`
-hooks that timestamp every hop so a latency budget can be attributed rather than guessed at, and a load balancer
-that reads the NIC's `SO_INCOMING_NAPI_ID` to keep a session on the CPU the kernel is already steering its packets
-to.
+The rest of the API is there so you can tune with numbers instead of guesses: a receive timestamp handed to `onRead`,
+`IOStats` hooks that timestamp every hop so a latency budget can be attributed rather than guessed at, and a load
+balancer that reads the NIC's `SO_INCOMING_NAPI_ID` so the sessions fed by one RX queue are served by one worker
+thread.
 
-The bar it had to clear was never Netty, though. It was the hand-rolled selector loop that every shop with a latency
-budget ends up writing, and then owning forever. [The benchmarks](#benchmarks) say it clears it: round-trip level
-with a hand-rolled busy-spinning NIO client, throughput ahead of it, at a fraction of a byte per operation. Betty is
-the transport half of a pair — [ringos](https://github.com/lolaf-org/ringos) is the other, and holds the ring
-buffers, idle strategies and threading primitives both of them stand on.
+The bar was never Netty, though. It was the hand-rolled selector loop that every shop with a latency budget ends up
+writing, and then owning forever. [The benchmarks](#benchmarks) say it clears it: round-trip level with a hand-rolled
+busy-spinning NIO client, throughput ahead of it. Betty is the transport half of a pair —
+[ringos](https://github.com/lolaf-org/ringos) holds the ring buffers, idle strategies and threading primitives both
+stand on.
 
 ## The two artifacts
 
@@ -155,7 +145,13 @@ Everything not needed to show a round trip is left at its default. What it does 
 the framing loop `while (message.remaining() >= FRAME_SIZE)` — betty compacts a trailing partial frame into the
 front of the next read, so you never buffer one yourself — and the fact that the one-second wait belongs on a
 scheduler rather than inside a callback, because an IO thread that sleeps stops serving every other session on that
-worker. [`examples/README.md`](examples/README.md) has the detail.
+worker.
+
+[`NapIdExample`](examples/src/main/java/org/lolaf/betty/examples/napid/NapIdExample.java) is the second one, and
+exists to be run on two machines: a server and four clients on `NapIdLoadBalancer`, bound to the host's first real
+adapter rather than loopback, printing each session's NAPI ID so the placement can be checked rather than assumed.
+Run both halves on one host and every ID reads 0 — same-host traffic is delivered locally whatever address it is
+sent to, so it never reaches an RX queue. [`examples/README.md`](examples/README.md) has the detail on both.
 
 ## Choosing a select strategy
 
@@ -172,12 +168,33 @@ thread group carrying the sessions that matter and block on the rest. Unset, a t
 
 ## Load balancing sessions across workers
 
-An `IOWorkersGroup` owns a set of worker threads and an `IOWorkerLoadBalancer` decides which one a new session lands
-on. Four are shipped: `DedicatedIOWorkerLoadBalancer` (one session per worker),
-`MinRegisteredSessionLoadBalancer` (fewest sessions, and the default), `MinIOThreadLoadSessionLoadBalancer` (least
-busy by measured thread load), and `NapIdLoadBalancer`, which reads Linux's `SO_INCOMING_NAPI_ID` so a session is
-handled on the worker whose CPU the NIC already steered its packets to. The other three fall back to the default
-when what they count is unavailable, so the choice is a tuning one and never a correctness one.
+An `IOWorkersGroup` owns a set of worker threads, and an `IOWorkerLoadBalancer` decides which one a new session lands
+on. Four are shipped:
+
+| Balancer | Picks the worker with | Choose it when |
+|---|---|---|
+| `MinRegisteredSessionLoadBalancer` *(default)* | the fewest registered sessions | sessions cost roughly the same. Counting them is free, so this is the one to keep unless something below earns its price |
+| `MinIOThreadLoadSessionLoadBalancer` | the lowest EMA of CPU time spent on IO | a few sessions are far busier than the rest. It needs per-session CPU accounting, which puts `System.nanoTime()` calls on the IO hot path — skew has to be real to be worth that |
+| `DedicatedIOWorkerLoadBalancer` | no session at all | a session's tail latency matters more than how many connections fit: it gets a thread to itself and nothing else interferes with it. Oversubscribe the group and strict pinning is gone |
+| `NapIdLoadBalancer` | the same NIC RX queue, read from `SO_INCOMING_NAPI_ID` | Linux, a real NIC, and workers you have pinned. The sessions one queue feeds are then drained by one thread instead of scattered across cores |
+
+None of them is a correctness decision. The last three fall back to the default whenever what they count is missing —
+every worker still reporting zero load at startup, more sessions than workers, a socket the kernel has no queue for
+yet — so a balancer that finds nothing to go on still spreads the load.
+
+**Placement is once, unless you ask for more.** The balancer is consulted when the channel is registered and that is
+final, until the group is given an `ioWorkersRebalanceInterval`. With one set, each balancer gets to revise itself on
+a timer: the default drains workers holding more than their share, the load-aware one moves a single session per pass
+so its EMA can absorb the last move before deciding the next, the dedicated one restores its 1:1 invariant, and the
+NIC-aware one follows a session whose queue has changed.
+
+**`NapIdLoadBalancer` needs that interval on the client side.** A NAPI ID names the RX queue a socket's packets
+arrive on, and betty picks a worker before the channel is connected — so an outbound session has no ID yet and is
+always placed by the fallback, with the rebalance moving it once the kernel has one. An accepted session is different:
+its ID comes in with the SYN and is there at accept time. The ID names a queue and never a core, so CPU locality is
+the operator's half of the job: pin the workers to the CPUs taking those queues' interrupts.
+[`NapIdExample`](examples/src/main/java/org/lolaf/betty/examples/napid/NapIdExample.java) runs it over a real adapter
+and prints what the kernel reports for every session.
 
 ## Building
 

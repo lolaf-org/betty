@@ -5,6 +5,7 @@ Runnable examples. Nothing here is published: the module exists to be read and r
 ```bash
 ./mvnw -T 1C clean install     # from the repository root
 java -jar examples/target/ping-example.jar
+java -jar examples/target/napid-example.jar
 ```
 
 ## Ping
@@ -46,6 +47,64 @@ thread that sleeps stops serving every other session on that worker. Writing fro
 here because the settings are the defaults — `IOSettings.multiThreadedWriteAPICalls` is true and the write pool is
 `MULTIPLE_BORROWER_THREADS`. Narrow either one and the send has to move onto the IO thread through
 `IOSession.processTask`.
+
+## NAPI ID placement
+
+[`NapIdExample`](src/main/java/org/lolaf/betty/examples/napid/NapIdExample.java) runs a server and four clients on
+`NapIdLoadBalancer`, binds to the host's first real adapter instead of loopback, and prints every session's NAPI ID
+every five seconds so the placement can be checked rather than assumed:
+
+```text
+10:53:01.393 [main] INFO NapIdExample - adapter wlp0s20f3 at 192.168.1.134 with 1 RX queue(s)
+10:53:06.437 [napid-reporter] INFO NapIdExample - IO-worker-napid-0: napid-server:/192.168.1.134:59440 napId=0
+10:53:06.438 [napid-reporter] INFO NapIdExample - IO-worker-napid-0: napid-client-3 napId=0
+10:53:06.438 [napid-reporter] INFO NapIdExample - IO-worker-napid-1: napid-server:/192.168.1.134:59464 napId=0
+```
+
+**Those zeros are the point.** A NAPI ID names the RX queue a socket's packets arrived on, and packets that never
+reach a NIC have none. Two processes on the same host are delivered locally whatever address they use — binding to
+`192.168.1.x` rather than `127.0.0.1` changes nothing — so the single-JVM run above reports `0` for every session
+and `MinRegisteredSessionLoadBalancer` places them all. Put the two halves on two machines and the IDs appear:
+
+```bash
+host A:  java -cp examples/target/napid-example.jar org.lolaf.betty.examples.napid.NapIdExample server
+host B:  java -cp examples/target/napid-example.jar org.lolaf.betty.examples.napid.NapIdExample client 192.168.1.x
+```
+
+A second machine running betty is the point, but not the cheapest way to watch the balancer place by ID: any TCP
+server on another machine will do, because the ID is set by the packets coming back and not by what is in them.
+Pointing the clients at a router's HTTP port is enough:
+
+```text
+java -jar examples/target/napid-example.jar client 192.168.1.1 80
+
+11:01:50.888 [main] INFO NapIdExample - adapter wlp0s20f3 at 192.168.1.x with 1 RX queue(s)
+11:01:55.927 [napid-reporter] INFO NapIdExample - IO-worker-napid-0: napid-client-1 napId=8205
+11:01:55.927 [napid-reporter] INFO NapIdExample - IO-worker-napid-0: napid-client-2 napId=8196
+11:01:55.927 [napid-reporter] INFO NapIdExample - IO-worker-napid-0: napid-client-3 napId=8205
+11:01:55.927 [napid-reporter] INFO NapIdExample - IO-worker-napid-1: napid-client-0 napId=8204
+```
+
+That is the balancer doing its job: the two sessions on queue 8205 share a worker, and 8204 is on the other one. The
+run also shows two things sysfs does not. The adapter reports one RX queue and three NAPI IDs — a wifi driver
+registers NAPI instances the queue count knows nothing about — so size the group by the IDs you observe rather than
+by the queue count alone. And every placement above was made by the fallback: betty picks a worker for a channel
+that has not connected yet, so a client socket has no ID at placement time, and the periodic rebalance is what moved
+`napid-client-0` onto worker-1 once the ID appeared. On the server side the ID comes in with the SYN and is there at
+accept time.
+
+An ID is an opaque number, not a queue index and not a CPU: the kernel allocates it from a global counter that
+starts above `NR_CPUS` precisely so it can never be mistaken for a CPU id, so the first queue on a kernel built with
+`CONFIG_NR_CPUS=8192` reports 8193. The balancer therefore hands each distinct ID the next slot it has and places on
+`slot % workerCount`; what it guarantees is that the sessions sharing a queue share a worker, not that the worker
+runs on any particular core. Pinning the workers to the CPUs taking those queues' interrupts is the separate,
+operator-side half of the story, and `/proc/interrupts` with `/proc/irq/<n>/smp_affinity_list` is where it is
+decided.
+
+The example sizes the group from the adapter's queue count — `ls /sys/class/net/<dev>/queues/` shows it, `ethtool -l
+<dev>` changes it — because that is how many distinct IDs its sessions can ever report. Placement at connect time
+can still see a `0`, which is why the group sets `ioWorkersRebalanceInterval`: the periodic rebalance is what moves
+a session onto the right worker once the kernel has an ID for it.
 
 ## Running it the way you would run production
 
