@@ -25,21 +25,21 @@ leave those dials where you can reach them.
 `LOW_LATENCY`, because there is no such configuration — so you block in `select()`, pay the wake-up on every
 cross-thread write, and allocate about 430 B per round trip.
 
-**Aeron** is the only client here that beats betty on latency, at 7.37 µs, and that is exactly what you should expect:
+**Aeron** is the only client here that beats betty on latency, at 6.89 µs, and that is exactly what you should expect:
 it is not TCP. It puts its own reliable delivery over UDP, so this is two different transports being compared, not two
 implementations of the same one. A connection is bidirectional the moment TCP gives it to you; in Aeron each direction
 is a separate publication and subscription you have to configure, address and operate, so a request/response link is
 two one-way streams you set up yourself. Adopting it means adopting that protocol, its media driver and its
-operational model at both ends of every link, for 473 B/op and a core it does not give back.
+operational model at both ends of every link, for 539 B/op and a core it does not give back.
 
 Below both is kernel bypass — a NIC you have to specify, DPDK, TCP moved into userspace — which does go lower, and
 costs you being stock. Betty stops deliberately on this side of that line: a standard JVM, its host OS's TCP stack,
 hardware nobody had to requisition.
 
-What that buys, over loopback with 16-byte packets: 11.70 µs and 24.52 Mops/s blocking in `select()`, 8.64 µs and
-25.78 Mops/s busy-spinning — the strategy chosen per thread group rather than per process, so the handful of sessions
-that matter get a core and the rest give theirs back. And 0.10 B per round trip, 0.00035 B per message on the
-throughput benchmark, against 166–632 B/op for Netty, Mina, Jetty and the JDK's own async API. Allocating is not
+What that buys, over loopback with 16-byte packets: 11.76 µs and 24.75 Mops/s blocking in `select()`, 9.15 µs and
+25.28 Mops/s busy-spinning — the strategy chosen per thread group rather than per process, so the handful of sessions
+that matter get a core and the rest give theirs back. And 0.095 B per round trip, 0.00033 B per message on the
+throughput benchmark, against 165–632 B/op for Netty, Mina, Jetty and the JDK's own async API. Allocating is not
 itself slow, but everything allocated is eventually collected, and a collection is a pause you did not schedule and
 will meet again at the far end of the distribution you are actually judged on.
 
@@ -232,14 +232,16 @@ the floor a library has to beat to be worth using. It is not published.
 cd benchmarks && ./run-benchmark.sh
 ```
 
-On the 2026-09-10 run — 16-byte packets over loopback, one machine, one fork — betty's round-trip latency is level
-with a hand-rolled busy-spinning NIO client (8.64 µs against 8.60, inside both error bars) and ahead of both
-hand-rolled clients on throughput by more than their intervals overlap. It is ahead of Netty, Mina, Jetty and the
-JDK's own `AsynchronousSocketChannel` on latency, and behind Aeron on latency in the one configuration Aeron is
-tuned for — while staying ahead of Aeron on throughput in both. Jetty on both benchmarks, Mina on throughput and the
-JDK client on round-trip carry error bars as wide as their own scores, so their placement is unresolved. The gap
-that is not close is allocation: 0.10 B/op per round-trip against 166–632 B/op for Netty, Mina, Jetty, the JDK
-client and Aeron in the configuration Aeron is quickest in — which is the whole point of the buffer pooling.
+On the 2026-09-11 run — 16-byte packets over loopback, one machine, one fork — betty's round-trip latency sits
+alongside a hand-rolled busy-spinning NIO client (9.15 µs against 8.53, inside that client's own interval) and leads
+both hand-rolled clients on throughput, though by less than their intervals overlap. It is ahead of Netty, Mina,
+Jetty and the JDK's own `AsynchronousSocketChannel` on latency, and behind Aeron on latency in the one configuration
+Aeron is tuned for — while staying ahead of Aeron on throughput in both. Jetty on both benchmarks, Mina and the JDK
+client on throughput, the JDK client on round-trip and Netty's `JDK_STOCK` throughput row carry error bars too wide
+to place them — for Jetty on throughput, Mina and the JDK client, as wide as their own scores — so their placement is
+unresolved. The gap that is not close is allocation: 0.095 B/op per round-trip against 165–632 B/op for Netty, Mina,
+Jetty, the JDK client and Aeron in the configuration Aeron is quickest in — which is the whole point of the buffer
+pooling.
 
 **Those numbers are one machine, and both benchmarks pin threads to cores derived from `availableProcessors()`, so
 two machines are not comparable.** Run them on your own hardware before believing any of it.
