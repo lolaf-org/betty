@@ -151,7 +151,13 @@ worker.
 exists to be run on two machines: a server and four clients on `NapIdLoadBalancer`, bound to the host's first real
 adapter rather than loopback, printing each session's NAPI ID so the placement can be checked rather than assumed.
 Run both halves on one host and every ID reads 0 — same-host traffic is delivered locally whatever address it is
-sent to, so it never reaches an RX queue. [`examples/README.md`](examples/README.md) has the detail on both.
+sent to, so it never reaches an RX queue.
+
+[`SlowConsumerExample`](examples/src/main/java/org/lolaf/betty/examples/watermark/SlowConsumerExample.java) is the
+third, and shows what `writeHighWatermark` and `writeLowWatermark` are for: a server producing flat out against a
+client that reads 256 KB a second, throttling itself on the high mark and starting again on the low one, so that
+averaged over a cycle it sends at exactly the rate the client reads.
+[`examples/README.md`](examples/README.md) has the detail on all three.
 
 ## Choosing a select strategy
 

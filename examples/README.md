@@ -106,6 +106,37 @@ The example sizes the group from the adapter's queue count — `ls /sys/class/ne
 can still see a `0`, which is why the group sets `ioWorkersRebalanceInterval`: the periodic rebalance is what moves
 a session onto the right worker once the kernel has an ID for it.
 
+## Watermarks and a slow consumer
+
+[`SlowConsumerExample`](src/main/java/org/lolaf/betty/examples/watermark/SlowConsumerExample.java) runs a server
+producing as fast as the socket will take bytes against a client that consumes 256 KB a second and stops selecting
+until the next one. `writeHighWatermark` and `writeLowWatermark` are what keep the two in step:
+
+```text
+high watermark 512 KB, low watermark 64 KB, client consuming 256 KB every 1000 ms - Ctrl-C to stop
+[watermark-producer]     HIGH watermark with 512 KB in flight - producer throttled
+[watermark-reporter]     produced 1008 KB/s, consumed 261 KB/s, producer throttled
+[watermark-reporter]     produced 0 KB/s, consumed 307 KB/s, producer throttled
+[IO-worker-...-server-0] LOW watermark with 64 KB in flight - producer resumed
+[watermark-producer]     HIGH watermark with 512 KB in flight - producer throttled
+[watermark-reporter]     produced 512 KB/s, consumed 226 KB/s, producer throttled
+```
+
+Betty counts the bytes a session has accepted for writing but has not yet put on the socket. Crossing the high mark
+calls `onWatermarkEvent` with `true`, falling back under the low mark calls it with `false`, and each edge is
+reported once — which is what makes the pair usable as a switch. The producer here stops on the first and starts
+again on the second, so the backlog oscillates between the two marks and, averaged over a cycle, the server sends at
+exactly the rate the client reads. Nothing else in the example limits it.
+
+Two settings exist only to keep the watermark in charge of that. `tasksRingBufferSize` and the write pool both have
+to hold every chunk the high watermark allows in flight, or the producer blocks on a full ring before the watermark
+ever fires, and the throttling you would be watching would be the ring's. Small `SO_SNDBUF` and `SO_RCVBUF` keep the
+backlog in betty, where `onWatermarkEvent` can see it, instead of in the kernel where it cannot.
+
+The event is advisory: nothing refuses a send for being over the mark. Ignore it and the producer keeps borrowing
+buffers for data the socket cannot take, and the write pool — then the heap behind it — is what pays for the client
+being slow.
+
 ## Running it the way you would run production
 
 The shaded jar carries `Add-Opens: java.base/jdk.internal.misc` in its manifest, which is what lets ringos reach

@@ -13,6 +13,7 @@ Both benchmarks talk to `BenchmarkServer`, a plain blocking-socket echo server o
 |---|---|---|
 | `ClientRTTBenchmark` | `AverageTime`, microseconds | send one message, wait for the ack — round-trip latency |
 | `ClientThroughputBenchmark` | `Throughput`, with `@OperationsPerInvocation` | 1024 messages of 16 bytes, acked as a batch |
+| `BackPressureBenchmark` | `AverageTime`, milliseconds | 4 MB handed to a session whose peer has stopped reading, timed until the last byte reaches the socket |
 
 Eight clients run in each: `betty`, `netty`, `aeron`, `mina`, `jetty`, `asynchronousSocketChannel`, and
 `NIOBlockingBusySpin` / `NIONonBlockingBusySpin` — the last two being what the JDK gives you with no library at
@@ -37,6 +38,34 @@ skipped.** Only betty is written for all of them:
 
 So run one benchmark and one parameter set at a time (`-p clientSettings=STOCK`) rather than the whole jar, unless
 errors in the log for the combinations that cannot exist are acceptable.
+
+## The back-pressure benchmark
+
+`BackPressureBenchmark` is not part of the comparison above and runs betty only. It exists because the other two
+never take the path it measures: `BenchmarkServer` drains as fast as it is fed, so its socket never refuses a byte.
+Instrumenting a throughput run showed exactly one `socket.write` call per message and **zero** zero-length writes, so
+nothing about how a refused write is handled can be measured there.
+
+`SlowConsumerServer` pauses 20 µs between 8 KB reads with a 32 KB receive buffer, which closes the window often
+enough that the writer sees partial and zero-length writes throughout the run. One invocation hands the session 4 MB
+and waits on `waitForAllMessagesSent`, so the score is the time to push a payload through a socket that keeps saying
+no.
+
+The consumer sets the floor, and what is worth reading is how much the writer adds to it — which is why the run is
+parameterised over `clientSettings` and not over the selector provider. A busy-spun selector notices the window
+reopening on its next pass; a blocking one has to be woken, so `STOCK` is where the cost of deferring a refused write
+shows up and `LOW_LATENCY` is where it mostly does not.
+
+```bash
+java -jar target/benchmarks.jar -rf json -prof gc BackPressureBenchmark
+```
+
+Run it before and after any change to `writeToSocket`, `continueWriteToSocket` or the write cycle around them.
+
+It needs more than the default single fork to say anything: at `-f 1 -i 3` one run came back 41.3 ± 26.4 ms, and at
+`-f 2 -i 5` the same build gave 40.4 ± 0.62 ms `STOCK` and 39.5 ± 0.39 ms `LOW_LATENCY`. So it resolves a couple of
+percent and no better — enough for a change that alters how often the writer waits for the selector, not for one that
+shaves instructions off the write path.
 
 ## Core affinity
 

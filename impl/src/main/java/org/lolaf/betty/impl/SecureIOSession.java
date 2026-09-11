@@ -55,6 +55,8 @@ class SecureIOSession extends IOSessionImpl {
     private final SSLEngine sslEngine;
     private final ByteBuffer[] sourceByteBufferArray;
     private final ByteBuffer encodingWriteBuffer;
+    /** True while {@link #encodingWriteBuffer} is flipped and holds a record the socket has not finished taking. */
+    private boolean encodedBytesPending;
     private final ByteBuffer[] decodingReadBuffer;
     private final Duration handshakeTimeout;
     /**
@@ -332,10 +334,20 @@ class SecureIOSession extends IOSessionImpl {
     protected int writeToSocket(ByteBuffer bufferOut) throws IOException {
         // always flip and mark buffer or when isOutboundDone message will be processed badly by exception handlers
         bufferOut.flip().mark();
+        return continueWriteToSocket(bufferOut);
+    }
+
+    @Override
+    protected int continueWriteToSocket(ByteBuffer bufferOut) throws IOException {
         if (sslEngine.isOutboundDone()) {
             throw new SSLException("SSL engine outbound is done");
         }
-        int bytesWritten = 0;
+        // a record the socket refused last time goes out before anything else is wrapped, or its bytes would be
+        // overwritten and the peer would see a corrupt record
+        int bytesWritten = flushEncodedBytes();
+        if (encodedBytesPending) {
+            return bytesWritten;
+        }
         sourceByteBufferArray[0] = bufferOut; // no concurrent access on this method call so no problem
         while (bufferOut.hasRemaining()) {
             SSLEngineResult result = sslEngine.wrap(sourceByteBufferArray, encodingWriteBuffer);
@@ -345,13 +357,31 @@ class SecureIOSession extends IOSessionImpl {
                 case CLOSED:
                     throw new IOException("Should have never happened");
                 case OK:
-                    bytesWritten += super.writeToSocket(encodingWriteBuffer);
-                    encodingWriteBuffer.clear();
+                    bytesWritten += flushEncodedBytes();
+                    if (encodedBytesPending) {
+                        return bytesWritten;
+                    }
                     break;
                 default:
                     log.error("Not handled case {}", result);
                     return bytesWritten;
             }
+        }
+        return bytesWritten;
+    }
+
+    private int flushEncodedBytes() throws IOException {
+        if (!encodedBytesPending) {
+            if (encodingWriteBuffer.position() == 0) {
+                return 0;
+            }
+            encodingWriteBuffer.flip();
+            encodedBytesPending = true;
+        }
+        int bytesWritten = super.continueWriteToSocket(encodingWriteBuffer);
+        if (!encodingWriteBuffer.hasRemaining()) {
+            encodingWriteBuffer.clear();
+            encodedBytesPending = false;
         }
         return bytesWritten;
     }

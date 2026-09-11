@@ -78,6 +78,10 @@ public class IOSettings {
     /**
      * In flight bytes to be written to socket to trigger a high watermark event {@link IOEventsListener#onWatermarkEvent(IOSession, boolean, long)}
      * set it to zero along with writeLowWatermark to disable it
+     * <p>
+     * Advisory: a send is never refused for being over it. A peer that stops reading leaves its messages queued and
+     * the socket takes them when it can, so this pair is how a producer learns to stop until the backlog has drained
+     * to {@link #writeLowWatermark}.
      */
     @Builder.Default
     private final int writeHighWatermark = 1024 * 1024 * 32;
