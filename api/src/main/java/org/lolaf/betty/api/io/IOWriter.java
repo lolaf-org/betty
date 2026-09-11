@@ -24,8 +24,9 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Socket sending methods. The sending behavior depends on the thread calling the send(...) method
  * In case of a regular application thread, message to send will be put in a queue and processed by session IO thread as soon as possible.
- * In case of IO thread (typically as a response from a processed read in the IO thread), all messages in the queue will be flushed first
- * in order to keep messages ordering and then only the message will be written directly to the socket.
+ * In case of IO thread (typically as a response from a processed read in the IO thread), the message is written straight
+ * to the socket without going through that queue, and so ahead of whatever other threads have put in it: ordering is
+ * kept per sending thread, not between them. It is only ever held back by a message the socket has not finished taking.
  * Methods implementations are lock free by design and thread safe
  */
 public interface IOWriter {
@@ -55,6 +56,8 @@ public interface IOWriter {
 
     /**
      * Sends a byte array, will use a Bytebuffer from the pool to send it
+     * <p>
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
      *
      * @param message the message to send
      */
@@ -62,6 +65,8 @@ public interface IOWriter {
 
     /**
      * Sends a ByteBuffer without any success or failure notifications
+     * <p>
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
      *
      * @param message                the message to send
      * @param ioBufferPoolByteBuffer flag to indicate that the provided ByteBuffer is managed by the session
@@ -73,6 +78,8 @@ public interface IOWriter {
 
     /**
      * Sends a ByteBuffer with a CompletableFuture as callback
+     * <p>
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
      *
      * @param message                the message to send
      * @param messageSendingContext  a context object bound to the message sent or null if none required.
@@ -91,6 +98,8 @@ public interface IOWriter {
     /**
      * Sends a ByteBuffer with a given callback, best memory friendly option as it induces not additional
      * CompletableFuture object creation compared to {@link #send(ByteBuffer, Object, boolean)}
+     * <p>
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
      *
      * @param message                the message to send
      * @param messageSendingContext  a context object bound to the message sent or null if none required.
@@ -110,6 +119,8 @@ public interface IOWriter {
      * in the IO thread shortly before sending the message to the remote session.
      * This API methods allows to ensure that protocols that send message with a sequence number can generate their next sequence number
      * within the IO thread and avoid any out of order messages sending
+     * <p>
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
      *
      * @param byteBufferBuilder     the builder for the ByteBuffer to be sent to the remote IO session
      * @param messageSendingContext a context object bound to the message sent or null if none required.
