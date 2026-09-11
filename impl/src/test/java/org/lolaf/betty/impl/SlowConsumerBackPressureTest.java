@@ -53,20 +53,59 @@ class SlowConsumerBackPressureTest extends AbstractTest {
 
     private static final int SOCKET_BUFFER_SIZE = 32 * 1024;
 
+    /** Larger than the send and receive buffers together, so the socket can never take it in one write. */
+    private static final int PARTIAL_WRITE_CHUNK_SIZE = 8 * SOCKET_BUFFER_SIZE;
+
     /**
      * Every chunk has to fit in the ring and in the pool at once, or the sender blocks before the watermark fires.
      */
     private static final int WRITES_IN_FLIGHT = 64;
 
+    /**
+     * A task runs on the IO thread inside the write cycle, so its {@code send} goes straight to the socket. The first
+     * one here is larger than the socket buffers can hold, so it is always written in part, and the second is made by
+     * the same task right after it: nothing else decides their order, and the remainder of the first has to reach the
+     * socket before any of the second.
+     */
+    @ParameterizedTest
+    @MethodSource("getTestParams")
+    void sendFromATaskKeepsItsPlaceInTheStream(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
+        WatermarkListener serverListener = new WatermarkListener();
+        SequenceCheckingListener clientListener = new SequenceCheckingListener();
+        setupTestEnvAndWaitForConnections(
+                clientBuilder.toBuilder().ioEventsListener(clientListener).ioSettings(consumerSettings()).build(),
+                serverBuilder.toBuilder().ioEventsListener(serverListener).ioSettings(producerSettings()).build());
+
+        clientIOsession.pause(Deadline.immediate());
+        AtomicLong sequence = new AtomicLong();
+        serverClientIOsession.processTask(() -> {
+            sendChunk(serverClientIOsession, sequence, PARTIAL_WRITE_CHUNK_SIZE);
+            sendChunk(serverClientIOsession, sequence, CHUNK_SIZE);
+        });
+
+        clientIOsession.resume();
+
+        await().untilAsserted(() -> assertThat(clientListener.getBytesRead())
+                .hasValue((long) PARTIAL_WRITE_CHUNK_SIZE + CHUNK_SIZE));
+        assertThat(clientListener.getCorruption()).isNull();
+    }
+
     private static void sendChunks(IOSession session) {
-        long sequence = 0;
-        for (int chunk = 0; chunk < CHUNKS; chunk++) {
-            ByteBuffer buffer = session.borrow(CHUNK_SIZE);
-            while (buffer.remaining() >= Long.BYTES) {
-                buffer.putLong(sequence++);
-            }
-            session.send(buffer, true);
+        sendChunks(session, new AtomicLong(), CHUNKS);
+    }
+
+    private static void sendChunks(IOSession session, AtomicLong sequence, int chunks) {
+        for (int chunk = 0; chunk < chunks; chunk++) {
+            sendChunk(session, sequence, CHUNK_SIZE);
         }
+    }
+
+    private static void sendChunk(IOSession session, AtomicLong sequence, int size) {
+        ByteBuffer buffer = session.borrow(size);
+        while (buffer.remaining() >= Long.BYTES) {
+            buffer.putLong(sequence.getAndIncrement());
+        }
+        session.send(buffer, true);
     }
 
     private static IOSettings producerSettings() {

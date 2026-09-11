@@ -633,17 +633,15 @@ class IOSessionImpl implements IOSession {
     private void processPendingRequests(int maxWritableBytesCount) throws IOException {
         if (pendingWrite.isNotFullyWritten()) {
             maxWritableBytesCount -= resumePendingWrite(0L);
-            // nothing may be polled while a message is half out: a request taken from the ring now would put its
-            // bytes in the middle of that one
-            if (shouldStopProcessingIOThreadRequests(maxWritableBytesCount)) return;
         }
-        while (ioThreadRequests.poll(localIOThreadWorkRequestConsumer)) {
+        // nothing may be polled while a message is half out, whoever left it there: a request taken from the ring now
+        // would put its bytes in the middle of that one
+        while (canContinueProcessingIOThreadRequests(maxWritableBytesCount)
+                && ioThreadRequests.poll(localIOThreadWorkRequestConsumer)) {
             if (localIOThreadRequest.isIOWriteOperation()) {
                 maxWritableBytesCount -= processIOWriteOperationForRegularBuffer(0L);
-                if (shouldStopProcessingIOThreadRequests(maxWritableBytesCount)) return;
             } else if (localIOThreadRequest.isIOWriteOperationWithByteBufferBuilder()) {
                 maxWritableBytesCount -= processIOWriteOperationForByteBufferBuilder(0L);
-                if (shouldStopProcessingIOThreadRequests(maxWritableBytesCount)) return;
             } else {
                 executeTask(localIOThreadRequest.task, localIOThreadRequest.taskCallback);
                 localIOThreadRequest.cleanIOThreadTask();
@@ -657,19 +655,17 @@ class IOSessionImpl implements IOSession {
             long resumeStartTime = activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE);
             maxWritableBytesCount -= resumePendingWrite(resumeStartTime);
             cpuTimeStats.writeCpuTimeInNanos += activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE) - resumeStartTime;
-            if (shouldStopProcessingIOThreadRequests(maxWritableBytesCount)) return;
         }
-        while (ioThreadRequests.poll(localIOThreadWorkRequestConsumer)) {
+        while (canContinueProcessingIOThreadRequests(maxWritableBytesCount)
+                && ioThreadRequests.poll(localIOThreadWorkRequestConsumer)) {
             if (localIOThreadRequest.isIOWriteOperation()) {
                 long startTime = activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE);
                 maxWritableBytesCount -= processIOWriteOperationForRegularBuffer(startTime);
                 cpuTimeStats.writeCpuTimeInNanos += activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE) - startTime;
-                if (shouldStopProcessingIOThreadRequests(maxWritableBytesCount)) return;
             } else if (localIOThreadRequest.isIOWriteOperationWithByteBufferBuilder()) {
                 long startTime = activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE);
                 maxWritableBytesCount -= processIOWriteOperationForByteBufferBuilder(startTime);
                 cpuTimeStats.writeCpuTimeInNanos += activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE) - startTime;
-                if (shouldStopProcessingIOThreadRequests(maxWritableBytesCount)) return;
             } else {
                 long startTime = activeIOStats.getTimeInNanos(IOStats.Operation.IO_THREAD_TASK);
                 executeTask(localIOThreadRequest.task, localIOThreadRequest.taskCallback);
@@ -680,17 +676,13 @@ class IOSessionImpl implements IOSession {
         clearWriteInterestUnlessRequeued();
     }
 
-    private boolean shouldStopProcessingIOThreadRequests(int maxWritableBytesCount) {
-        if (pendingWrite.isNotFullyWritten() || maxWritableBytesCount < 0) {
-            selectionKey.interestOpsOr(SelectionKey.OP_WRITE);
-            return true;
-        }
-        return false;
+    private boolean canContinueProcessingIOThreadRequests(int maxWritableBytesCount) {
+        return pendingWrite.isFullyWritten() && maxWritableBytesCount >= 0;
     }
 
     private void clearWriteInterestUnlessRequeued() {
         selectionKey.interestOpsAnd(~SelectionKey.OP_WRITE);
-        if (ioThreadRequests.isNotEmpty()) {
+        if (ioThreadRequests.isNotEmpty() || pendingWrite.isNotFullyWritten()) {
             selectionKey.interestOpsOr(SelectionKey.OP_WRITE);
         }
     }
