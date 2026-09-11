@@ -75,6 +75,7 @@ class IOSessionImpl implements IOSession {
     private final RemoteSessionsFilter remoteSessionsFilter;
     private final WriteWatermarkStateTracker writeWatermarkState;
     private final int maxBytesCountPerWriteCycle;
+    private final boolean orderedWrites;
     @Getter(AccessLevel.PACKAGE)
     private final AtomicBoolean started;
     private final IntFunction<ByteBuffer> readBufferAllocator;
@@ -86,6 +87,7 @@ class IOSessionImpl implements IOSession {
     private final Consumer<IOThreadRequest> localIOThreadWorkRequestConsumer;
     private final IOStats ioStats;
     private final CpuTimeStats cpuTimeStats;
+    private boolean insideWriteCycle;
     private Consumer<IOSession> sessionStoppedConsumer;
     private Thread ioWorkerThread;
     private IdleStrategy ioThreadSocketWriteRequestsIdleStrategy;
@@ -123,7 +125,10 @@ class IOSessionImpl implements IOSession {
         ioSettings = ioSettings.toBuilder().writeIoBufferPoolSettings(ioSettings.getWriteIoBufferPoolSettings().toBuilder()
                 .multiThreadingAccessMode(poolMultiThreadingMode).build()).build();
         this.pendingWrite = new IOThreadRequest(0);
-        this.ioThreadRequests = ioSettings.isMultiThreadedWriteAPICalls()
+        this.orderedWrites = ioSettings.isOrderedWrites();
+        // ordered writes make the IO thread queue its own messages, and so a producer of the ring on top of whichever
+        // application threads write to the session
+        this.ioThreadRequests = ioSettings.isMultiThreadedWriteAPICalls() || orderedWrites
                 ? RingBufferFactory.build(RingBufferFactory.AccessType.SINGLE_CONSUMER_MULTI_PRODUCER, ioSettings.getTasksRingBufferSize(), IOThreadRequest::new)
                 : RingBufferFactory.build(RingBufferFactory.AccessType.SINGLE_CONSUMER_SINGLE_PRODUCER, ioSettings.getTasksRingBufferSize(), IOThreadRequest::new);
         this.ioBufferPool = sharedIOBufferPool != null ? sharedIOBufferPool : ioSettings.getWriteIoBufferPoolSettings().newInstance();
@@ -181,6 +186,12 @@ class IOSessionImpl implements IOSession {
             };
         }
         return voidStats;
+    }
+
+    private static void discardRemaining(ByteBuffer bufferOut) {
+        if (bufferOut != null) {
+            bufferOut.position(bufferOut.limit());
+        }
     }
 
     private BackoffIdleStrategy getIdleStrategy(Consumer<IOSession> ringBufferFullConsumer) {
@@ -619,7 +630,12 @@ class IOSessionImpl implements IOSession {
     }
 
     final void onOperationWrite() throws IOException {
-        onOperationWriteInternal();
+        insideWriteCycle = true;
+        try {
+            onOperationWriteInternal();
+        } finally {
+            insideWriteCycle = false;
+        }
     }
 
     void onOperationWriteInternal() throws IOException {
@@ -692,26 +708,24 @@ class IOSessionImpl implements IOSession {
         // built inside the try: a builder that throws is a failed write like any other, and its caller has to be
         // told and its sending context released
         ByteBuffer bufferOut = null;
-        boolean deferred = false;
         try {
             localIOThreadRequest.watermarkEnqueuedBytes = bbb.getEstimatedByteBufferSize();
             bufferOut = bbb.build();
             // from here the built buffer is the write, so a partial one resumes as an ordinary buffer
             localIOThreadRequest.byteBuffer = bufferOut;
             localIOThreadRequest.ioBufferPoolByteBuffer = bbb.isPooledByteBuffer();
-            int bytesWritten = writeBufferOut(localIOThreadRequest, false, localWriteStartTimeInNanos);
-            deferred = bufferOut.hasRemaining();
-            return bytesWritten;
+            return writeBufferOut(localIOThreadRequest, false, localWriteStartTimeInNanos);
         } catch (IOException ex) {
             safelyProcessCallbackOnIOException(ex,
                     localIOThreadRequest.writeFuture,
                     localIOThreadRequest.messageSentCallback,
                     localIOThreadRequest.messageSendingContext,
                     bufferOut);
+            discardRemaining(bufferOut);
             throw ex;
         } finally {
             localIOThreadRequest.byteBufferBuilder = null;
-            if (deferred) {
+            if (bufferOut != null && bufferOut.hasRemaining()) {
                 pendingWrite.transferFromPoll(localIOThreadRequest);
             } else {
                 if (bufferOut != null && bbb.isPooledByteBuffer()) {
@@ -725,21 +739,19 @@ class IOSessionImpl implements IOSession {
 
     private int processIOWriteOperationForRegularBuffer(long localWriteStartTime) throws IOException {
         ByteBuffer bufferOut = localIOThreadRequest.byteBuffer;
-        boolean deferred = false;
         try {
             localIOThreadRequest.watermarkEnqueuedBytes = bufferOut.position();
-            int bytesWritten = writeBufferOut(localIOThreadRequest, false, localWriteStartTime);
-            deferred = bufferOut.hasRemaining();
-            return bytesWritten;
+            return writeBufferOut(localIOThreadRequest, false, localWriteStartTime);
         } catch (IOException ex) {
             safelyProcessCallbackOnIOException(ex,
                     localIOThreadRequest.writeFuture,
                     localIOThreadRequest.messageSentCallback,
                     localIOThreadRequest.messageSendingContext,
                     bufferOut);
+            discardRemaining(bufferOut);
             throw ex;
         } finally {
-            if (deferred) {
+            if (bufferOut.hasRemaining()) {
                 pendingWrite.transferFromPoll(localIOThreadRequest);
             } else {
                 if (localIOThreadRequest.ioBufferPoolByteBuffer) {
@@ -754,20 +766,18 @@ class IOSessionImpl implements IOSession {
         ByteBuffer bufferOut = pendingWrite.byteBuffer;
         // read before the write: its own callback can hand the slot to another message
         boolean pooledBuffer = pendingWrite.ioBufferPoolByteBuffer;
-        boolean deferred = false;
         try {
-            int bytesWritten = writeBufferOut(pendingWrite, true, localWriteStartTime);
-            deferred = bufferOut.hasRemaining();
-            return bytesWritten;
+            return writeBufferOut(pendingWrite, true, localWriteStartTime);
         } catch (IOException ex) {
             safelyProcessCallbackOnIOException(ex,
                     pendingWrite.writeFuture,
                     pendingWrite.messageSentCallback,
                     pendingWrite.messageSendingContext,
                     bufferOut);
+            discardRemaining(bufferOut);
             throw ex;
         } finally {
-            if (!deferred) {
+            if (!bufferOut.hasRemaining()) {
                 if (pooledBuffer) {
                     ioBufferPool.returnByteBuffer(bufferOut);
                 }
@@ -888,14 +898,12 @@ class IOSessionImpl implements IOSession {
             }
         }
         if (pendingWrite.isNotFullyWritten()) {
-            safelyProcessCallbackOnIOException(new EOFException("Cancelled socket write on IOSession " + id + " due to disconnection"),
-                    pendingWrite.writeFuture, pendingWrite.messageSentCallback, pendingWrite.messageSendingContext, pendingWrite.byteBuffer);
+            safelyProcessCallbackOnDisconnection(pendingWrite);
             pendingWrite.cleanRegularIOWriteOperation();
         }
         ioThreadRequests.forEach(request -> {
             if (request.isIOWriteOperation() || request.isIOWriteOperationWithByteBufferBuilder()) {
-                safelyProcessCallbackOnIOException(new EOFException("Cancelled socket write on IOSession " + id + " due to disconnection"),
-                        request.writeFuture, request.messageSentCallback, request.messageSendingContext, request.byteBuffer);
+                safelyProcessCallbackOnDisconnection(request);
             } else {
                 request.taskCallback.accept(request.task, new EOFException("Cancelled task " + request.task.getClass().getName() + " on IOSession " + id + " due to disconnection"));
             }
@@ -910,10 +918,21 @@ class IOSessionImpl implements IOSession {
         }
     }
 
+    private void safelyProcessCallbackOnDisconnection(IOThreadRequest threadRequest) {
+        safelyProcessCallbackOnIOException(new EOFException("Cancelled socket write on IOSession " + id + " due to disconnection"),
+                threadRequest.writeFuture, threadRequest.messageSentCallback, threadRequest.messageSendingContext, threadRequest.byteBuffer);
+    }
+
     void releasePooledBuffers() {
         if (!sharedIOBufferPool) {
             ioBufferPool.stop();
         }
+    }
+
+    private interface IOThreadSender {
+
+        boolean send(ByteBuffer message, IOWriter.MessageSentCallback messageSentCallback, Object messageSendingContext,
+                     CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer);
     }
 
     private interface WriteWatermarkStateTracker {
@@ -1189,6 +1208,7 @@ class IOSessionImpl implements IOSession {
         private final RingBuffer.EventTranslatorTwoArg<IOThreadRequest, ByteBuffer, Boolean> translateSend = this::translateSend;
         private final RingBuffer.EventTranslatorThreeArg<IOThreadRequest, ByteBufferBuilder, MessageSentCallback<?>, Object> translateSendWithByteBufferBuilder = this::translateSendByteBufferBuilder;
         private final IOSession ioSession = IOSessionImpl.this;
+        private final IOThreadSender ioThreadSender = orderedWrites ? this::declineSendOnIOThread : this::sendOnIOThread;
 
         @Override
         public ByteBuffer borrow(int capacity) {
@@ -1231,24 +1251,92 @@ class IOSessionImpl implements IOSession {
         public <C> CompletableFuture<C> send(ByteBuffer message, C messageSendingContext, boolean ioBufferPoolByteBuffer) {
             if (Thread.currentThread() == ioWorkerThread) {
                 CompletableFuture<C> ioThreadFuture = new CompletableFuture<>();
-                if (pendingWrite.isFullyWritten()) {
-                    sendOnIOThread(message, null, messageSendingContext, ioThreadFuture, ioBufferPoolByteBuffer);
+                if (pendingWrite.isFullyWritten()
+                        && ioThreadSender.send(message, null, messageSendingContext, ioThreadFuture, ioBufferPoolByteBuffer)) {
                     return ioThreadFuture;
                 }
-                if (!ioThreadRequests.offer(translateSendWithFuture, message, ioThreadFuture, messageSendingContext, ioBufferPoolByteBuffer)) {
+                if (!offerOrDrainAndRetry(translateSendWithFuture, message, ioThreadFuture, messageSendingContext, ioBufferPoolByteBuffer)) {
                     return CompletableFuture.failedFuture(writeRingFull());
                 }
                 onWriteQueued(message);
                 return ioThreadFuture;
             }
             CompletableFuture<C> future = new CompletableFuture<>();
-            ioThreadRequests.offerBlocking(translateSendWithFuture, message, future, messageSendingContext,
-                    ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
-            if (writeWatermarkState.isEnabled()) {
-                writeWatermarkState.onEnqueued(message);
-            }
-            registerWriteOperationIfNeeded();
+            ioThreadRequests.offerBlocking(translateSendWithFuture, message, future, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
+            onWriteQueued(message);
             return future;
+        }
+
+        @Override
+        public <C> void send(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
+            if (Thread.currentThread() == ioWorkerThread) {
+                if (pendingWrite.isFullyWritten()
+                        && ioThreadSender.send(message, messageSentCallback, messageSendingContext, null, ioBufferPoolByteBuffer)) {
+                    return;
+                }
+                if (!offerOrDrainAndRetry(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer)) {
+                    safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, message);
+                    return;
+                }
+                onWriteQueued(message);
+                return;
+            }
+            ioThreadRequests.offerBlocking(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
+            onWriteQueued(message);
+        }
+
+        @Override
+        public void send(byte[] message) {
+            send(ioBufferPool.borrowByteBuffer(message.length).put(message), true);
+        }
+
+        @Override
+        public void send(ByteBuffer message, boolean ioBufferPoolByteBuffer) {
+            if (Thread.currentThread() == ioWorkerThread) {
+                if (pendingWrite.isFullyWritten()
+                        && ioThreadSender.send(message, null, null, null, ioBufferPoolByteBuffer)) {
+                    return;
+                }
+                if (!offerOrDrainAndRetry(translateSend, message, ioBufferPoolByteBuffer)) {
+                    ioEventsListener.onWriteFailure(ioSession, message.flip());
+                    return;
+                }
+                onWriteQueued(message);
+                return;
+            }
+            ioThreadRequests.offerBlocking(translateSend, message, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
+            onWriteQueued(message);
+        }
+
+        @Override
+        public <C> void send(ByteBufferBuilder byteBufferBuilder, C messageSendingContext, MessageSentCallback<C> messageSentCallback) {
+            if (Thread.currentThread() == ioWorkerThread) {
+                // !paused as well: this branch builds the message before offering it, and a declined send would have
+                // nowhere to put one the builder can no longer be asked for a second time
+                if (!orderedWrites && !paused && pendingWrite.isFullyWritten()) {
+                    try {
+                        ioThreadSender.send(byteBufferBuilder.build(), messageSentCallback, messageSendingContext, null, byteBufferBuilder.isPooledByteBuffer());
+                    } catch (IOException ex) {
+                        safelyProcessCallbackOnIOException(ex, null, messageSentCallback, messageSendingContext, null);
+                    }
+                    return;
+                }
+                if (writeWatermarkState.isEnabled()) {
+                    writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
+                }
+                if (!offerOrDrainAndRetry(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext)) {
+                    safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, null);
+                    return;
+                }
+                registerWriteOperationIfNeeded();
+                return;
+            }
+            if (writeWatermarkState.isEnabled()) {
+                // important enqueue first as the ioThreadRequests could be faster processing the byteBufferBuilder and call release() before calling getEstimatedByteBufferSize()
+                writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
+            }
+            ioThreadRequests.offerBlocking(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext, ioThreadSocketWriteRequestsIdleStrategy);
+            registerWriteOperationIfNeeded();
         }
 
         private void registerWriteOperationIfNeeded() {
@@ -1270,86 +1358,39 @@ class IOSessionImpl implements IOSession {
             }
         }
 
-        @Override
-        public <C> void send(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
-            if (Thread.currentThread() == ioWorkerThread) {
-                if (pendingWrite.isFullyWritten()) {
-                    sendOnIOThread(message, messageSentCallback, messageSendingContext, null, ioBufferPoolByteBuffer);
-                    return;
-                }
-                if (!ioThreadRequests.offer(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer)) {
-                    safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, message);
-                    return;
-                }
-                onWriteQueued(message);
-                return;
-            }
-            ioThreadRequests.offerBlocking(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
-            if (writeWatermarkState.isEnabled()) {
-                writeWatermarkState.onEnqueued(message);
-            }
-            registerWriteOperationIfNeeded();
+        private <A, B> boolean offerOrDrainAndRetry(RingBuffer.EventTranslatorTwoArg<IOThreadRequest, A, B> translator,
+                                                    A first, B second) {
+            return ioThreadRequests.offer(translator, first, second)
+                    || (drainWriteQueue() && ioThreadRequests.offer(translator, first, second));
         }
 
-        @Override
-        public void send(byte[] message) {
-            send(ioBufferPool.borrowByteBuffer(message.length).put(message), true);
+        private <A, B, C> boolean offerOrDrainAndRetry(RingBuffer.EventTranslatorThreeArg<IOThreadRequest, A, B, C> translator,
+                                                       A first, B second, C third) {
+            return ioThreadRequests.offer(translator, first, second, third)
+                    || (drainWriteQueue() && ioThreadRequests.offer(translator, first, second, third));
         }
 
-        @Override
-        public void send(ByteBuffer message, boolean ioBufferPoolByteBuffer) {
-            if (Thread.currentThread() == ioWorkerThread) {
-                if (pendingWrite.isFullyWritten()) {
-                    sendOnIOThread(message, null, null, null, ioBufferPoolByteBuffer);
-                    return;
-                }
-                if (!ioThreadRequests.offer(translateSend, message, ioBufferPoolByteBuffer)) {
-                    ioEventsListener.onWriteFailure(ioSession, message.flip());
-                    return;
-                }
-                onWriteQueued(message);
-                return;
-            }
-            ioThreadRequests.offerBlocking(translateSend, message, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
-            if (writeWatermarkState.isEnabled()) {
-                writeWatermarkState.onEnqueued(message);
-            }
-            registerWriteOperationIfNeeded();
+        private <A, B, C, D> boolean offerOrDrainAndRetry(RingBuffer.EventTranslatorFourArg<IOThreadRequest, A, B, C, D> translator,
+                                                          A first, B second, C third, D fourth) {
+            return ioThreadRequests.offer(translator, first, second, third, fourth)
+                    || (drainWriteQueue() && ioThreadRequests.offer(translator, first, second, third, fourth));
         }
 
-        @Override
-        public <C> void send(ByteBufferBuilder byteBufferBuilder, C messageSendingContext, MessageSentCallback<C> messageSentCallback) {
-            if (Thread.currentThread() == ioWorkerThread) {
-                if (pendingWrite.isFullyWritten()) {
-                    // built here rather than in the write helper: a builder that throws is a failed write like any
-                    // other, and its caller has to be told
-                    ByteBuffer message;
-                    try {
-                        message = byteBufferBuilder.build();
-                    } catch (IOException ex) {
-                        safelyProcessCallbackOnIOException(ex, null, messageSentCallback, messageSendingContext, null);
-                        return;
-                    }
-                    sendOnIOThread(message, messageSentCallback, messageSendingContext, null, byteBufferBuilder.isPooledByteBuffer());
-                    return;
-                }
-                if (writeWatermarkState.isEnabled()) {
-                    writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
-                }
-                if (!ioThreadRequests.offer(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext)) {
-                    safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, null);
-                    return;
-                }
-                registerWriteOperationIfNeeded();
-                return;
+        private boolean drainWriteQueue() {
+            if (insideWriteCycle || paused) {
+                return false;
             }
-            if (writeWatermarkState.isEnabled()) {
-                // important enqueue first as the ioThreadRequests could be faster processing the byteBufferBuilder and call release() before calling getEstimatedByteBufferSize()
-                writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
+            try {
+                onOperationWrite();
+                return true;
+            } catch (IOException ex) {
+                // the session is finished, but this is not where that is handled: let the send fail like any other and
+                // leave the disconnection to the IO worker's own error path
+                log.debug("Failed to drain the write queue of IO session {}: {}", id, ex.getMessage());
+                return false;
             }
-            ioThreadRequests.offerBlocking(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext, ioThreadSocketWriteRequestsIdleStrategy);
-            registerWriteOperationIfNeeded();
         }
+
 
         private void onWriteQueued(ByteBuffer message) {
             if (writeWatermarkState.isEnabled()) {
@@ -1359,12 +1400,22 @@ class IOSessionImpl implements IOSession {
         }
 
         private IOException writeRingFull() {
-            return new IOException("Cannot queue a write on IOSession " + id + ": the write ring is full while a message "
-                    + "is still on its way out to a peer that stopped reading");
+            return new IOException("Cannot queue a write on IOSession " + id + ": the write ring is full and writing "
+                    + "what it holds did not free it, the peer is not reading");
         }
 
-        private void sendOnIOThread(ByteBuffer message, MessageSentCallback messageSentCallback, Object messageSendingContext,
-                                    CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer) {
+        private boolean declineSendOnIOThread(ByteBuffer message, MessageSentCallback messageSentCallback, Object messageSendingContext,
+                                              CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer) {
+            return false;
+        }
+
+        private boolean sendOnIOThread(ByteBuffer message, MessageSentCallback messageSentCallback, Object messageSendingContext,
+                                       CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer) {
+            if (paused) {
+                // a paused session puts nothing on the socket, and the selector is not what stops this write: queueing
+                // it is, and it leaves on resume
+                return false;
+            }
             pendingWrite.byteBuffer = message;
             pendingWrite.ioBufferPoolByteBuffer = ioBufferPoolByteBuffer;
             pendingWrite.messageSentCallback = messageSentCallback;
@@ -1375,14 +1426,13 @@ class IOSessionImpl implements IOSession {
             if (writeWatermarkState.isEnabled()) {
                 writeWatermarkState.onEnqueued(message);
             }
-            boolean deferred = false;
             try {
                 writeBufferOut(pendingWrite, false, activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE));
-                deferred = message.hasRemaining();
             } catch (IOException ex) {
                 safelyProcessCallbackOnIOException(ex, writeFuture, messageSentCallback, messageSendingContext, message);
+                discardRemaining(message);
             } finally {
-                if (deferred) {
+                if (message.hasRemaining()) {
                     registerWriteOperationIfNeeded();
                 } else {
                     if (ioBufferPoolByteBuffer) {
@@ -1394,6 +1444,7 @@ class IOSessionImpl implements IOSession {
                     }
                 }
             }
+            return true;
         }
     }
 }

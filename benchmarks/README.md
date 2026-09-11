@@ -67,6 +67,20 @@ It needs more than the default single fork to say anything: at `-f 1 -i 3` one r
 percent and no better — enough for a change that alters how often the writer waits for the selector, not for one that
 shaves instructions off the write path.
 
+## Measuring `orderedWrites`
+
+`BettyClient` answers reads from the IO thread, so `IOSettings.orderedWrites` decides whether each answer is a socket
+write or a ring round trip, and both benchmarks sit on that path. It is a `@Param` on `BettyClient` alone, fixed to
+`false` so the tables above are unaffected; pass both values to compare:
+
+```bash
+java -jar target/benchmarks.jar -f 2 -p orderedWrites=false,true ClientRTTBenchmark.betty
+```
+
+On the run of this repository's own machine it cost 7.31 % of round-trip latency in `STOCK` and 3.35 % in
+`LOW_LATENCY` - the gap between them being the selector wakeup a busy-spun group does not pay - and nothing outside
+the error bars on throughput, where 1024 messages leave in about two socket writes either way.
+
 ## Core affinity
 
 The JMH thread and betty's IO thread are pinned with OpenHFT `Affinity` to cores derived from

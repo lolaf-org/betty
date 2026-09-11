@@ -69,6 +69,23 @@ public class IOSettings {
     private final boolean multiThreadedWriteAPICalls = true;
 
     /**
+     * Whether the session keeps one order across the threads writing to it. It does not by default: a {@code send}
+     * made on the session's own IO thread, typically answering a read, goes straight to the socket, which is what
+     * makes such an answer cost a socket write and nothing else, and is why it can leave ahead of messages other
+     * threads have already queued.
+     * <p>
+     * Turn it on and those sends are queued like any other, paid for with a ring round trip per message. The IO thread
+     * cannot wait on a ring only it drains, so when the ring is full it writes out what the ring holds and tries once
+     * more; a send that still finds no room fails rather than overtaking.
+     * <p>
+     * That round trip costs 3 to 7 % of round-trip latency on a server answering from {@code onRead}, most of it the
+     * selector wakeup a busy-spun thread group does not pay, and next to nothing where messages are batched - which is
+     * why one order across threads is not the default.
+     */
+    @Builder.Default
+    private final boolean orderedWrites = false;
+
+    /**
      * The maximum number of bytes that can be written to a socket by the IO worker thread during a write cycle, allowing IO bandwidth fairness amongst connections.
      * Can add more latency to connections using a lot of bandwidth
      */

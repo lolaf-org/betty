@@ -27,6 +27,8 @@ import java.util.concurrent.CompletableFuture;
  * In case of IO thread (typically as a response from a processed read in the IO thread), the message is written straight
  * to the socket without going through that queue, and so ahead of whatever other threads have put in it: ordering is
  * kept per sending thread, not between them. It is only ever held back by a message the socket has not finished taking.
+ * {@link IOSettings#isOrderedWrites()} queues those sends as well, which gives the session one order whichever thread
+ * writes to it, for a ring round trip per message.
  * Methods implementations are lock free by design and thread safe
  */
 public interface IOWriter {
@@ -57,7 +59,8 @@ public interface IOWriter {
     /**
      * Sends a byte array, will use a Bytebuffer from the pool to send it
      * <p>
-     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
+     * unless {@link IOSettings#isOrderedWrites()} is set.
      *
      * @param message the message to send
      */
@@ -66,7 +69,8 @@ public interface IOWriter {
     /**
      * Sends a ByteBuffer without any success or failure notifications
      * <p>
-     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
+     * unless {@link IOSettings#isOrderedWrites()} is set.
      *
      * @param message                the message to send
      * @param ioBufferPoolByteBuffer flag to indicate that the provided ByteBuffer is managed by the session
@@ -79,7 +83,8 @@ public interface IOWriter {
     /**
      * Sends a ByteBuffer with a CompletableFuture as callback
      * <p>
-     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
+     * unless {@link IOSettings#isOrderedWrites()} is set.
      *
      * @param message                the message to send
      * @param messageSendingContext  a context object bound to the message sent or null if none required.
@@ -99,7 +104,8 @@ public interface IOWriter {
      * Sends a ByteBuffer with a given callback, best memory friendly option as it induces not additional
      * CompletableFuture object creation compared to {@link #send(ByteBuffer, Object, boolean)}
      * <p>
-     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
+     * unless {@link IOSettings#isOrderedWrites()} is set.
      *
      * @param message                the message to send
      * @param messageSendingContext  a context object bound to the message sent or null if none required.
@@ -120,7 +126,8 @@ public interface IOWriter {
      * This API methods allows to ensure that protocols that send message with a sequence number can generate their next sequence number
      * within the IO thread and avoid any out of order messages sending
      * <p>
-     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued.
+     * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
+     * unless {@link IOSettings#isOrderedWrites()} is set.
      *
      * @param byteBufferBuilder     the builder for the ByteBuffer to be sent to the remote IO session
      * @param messageSendingContext a context object bound to the message sent or null if none required.

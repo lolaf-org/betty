@@ -35,6 +35,7 @@ import net.openhft.affinity.Affinity;
 import org.lolaf.ringos.idling.BusySpinIdleStrategy;
 import org.lolaf.ringos.threading.FastThreadLocalThread;
 import org.openjdk.jmh.annotations.Scope;
+import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.State;
 
 import java.net.StandardSocketOptions;
@@ -48,6 +49,13 @@ public class BettyClient extends AbstractClientBenchmark {
 
     private final IOEventsListener ioEventsListener = this::readMessage;
     private Client client;
+
+    /**
+     * This client answers reads from the IO thread, so the setting decides whether every answer goes straight to the
+     * socket or takes a ring round trip. One value by default: pass {@code -p orderedWrites=false,true} to compare.
+     */
+    @Param({"false"})
+    boolean orderedWrites;
 
     private static SelectStrategy getSelectStrategy(ClientSettings clientSettings) {
         return clientSettings.equals(ClientSettings.LOW_LATENCY)
@@ -73,6 +81,7 @@ public class BettyClient extends AbstractClientBenchmark {
         client = ClientBuilder.builder()
                 .connectAddress(BenchmarkServer.CONNECT_ADDRESS)
                 .ioSettings(IOSettings.builder()
+                        .orderedWrites(orderedWrites)
                         .multiThreadedWriteAPICalls(false)
                         .readBufferSize(READ_BUFFER_SIZE)
                         .tasksRingBufferSize(IO_WRITE_BUFFER_POOL_SIZE)
