@@ -936,13 +936,6 @@ class IOSessionImpl implements IOSession {
     }
 
     private interface WriteWatermarkStateTracker {
-        default void onEnqueued(ByteBuffer byteBuffer) {
-            onEnqueued(byteBuffer.position());
-        }
-
-        default void onDequeued(ByteBuffer byteBuffer) {
-            onDequeued(byteBuffer.position());
-        }
 
         void onEnqueued(int bytesCount);
 
@@ -1111,7 +1104,8 @@ class IOSessionImpl implements IOSession {
         private final AtomicInteger inFlightBytesToWrite;
         private final IOSession ioSession;
         private final IOEventsListener ioEventsListener;
-        private boolean highWatermarkReached;
+        // the sender thread counts the enqueues and the IO worker the dequeues
+        private final AtomicBoolean highWatermarkReached;
 
         public ActiveWriteWatermarkStateTracker(int writeHighWatermark, int writeLowWatermark, AtomicInteger inFlightBytesToWrite,
                                                 IOSession ioSession, IOEventsListener ioEventsListener) {
@@ -1123,21 +1117,24 @@ class IOSessionImpl implements IOSession {
             this.inFlightBytesToWrite = inFlightBytesToWrite;
             this.ioSession = ioSession;
             this.ioEventsListener = ioEventsListener;
+            this.highWatermarkReached = new AtomicBoolean();
         }
 
         @Override
         public void onEnqueued(int bytesCount) {
-            if (inFlightBytesToWrite.addAndGet(bytesCount) >= writeHighWatermark && !highWatermarkReached) {
-                highWatermarkReached = true;
-                ioEventsListener.onWatermarkEvent(ioSession, true, inFlightBytesToWrite.get());
+            // what the add returned, never a second read: the other thread moves the same counter, and re-reading it
+            // reports a total that has already left the edge being announced
+            int inFlightBytes = inFlightBytesToWrite.addAndGet(bytesCount);
+            if (inFlightBytes >= writeHighWatermark && highWatermarkReached.compareAndSet(false, true)) {
+                ioEventsListener.onWatermarkEvent(ioSession, true, inFlightBytes);
             }
         }
 
         @Override
         public void onDequeued(int bytesCount) {
-            if (inFlightBytesToWrite.addAndGet(-bytesCount) <= writeLowWatermark && highWatermarkReached) {
-                highWatermarkReached = false;
-                ioEventsListener.onWatermarkEvent(ioSession, false, inFlightBytesToWrite.get());
+            int inFlightBytes = inFlightBytesToWrite.addAndGet(-bytesCount);
+            if (inFlightBytes <= writeLowWatermark && highWatermarkReached.compareAndSet(true, false)) {
+                ioEventsListener.onWatermarkEvent(ioSession, false, inFlightBytes);
             }
         }
     }
@@ -1255,34 +1252,39 @@ class IOSessionImpl implements IOSession {
                         && ioThreadSender.send(message, null, messageSendingContext, ioThreadFuture, ioBufferPoolByteBuffer)) {
                     return ioThreadFuture;
                 }
-                if (!offerOrDrainAndRetry(translateSendWithFuture, message, ioThreadFuture, messageSendingContext, ioBufferPoolByteBuffer)) {
-                    return CompletableFuture.failedFuture(writeRingFull());
+                int enqueuedBytes = onWriteQueueing(message);
+                if (offerOrDrainAndRetry(translateSendWithFuture, message, ioThreadFuture, messageSendingContext, ioBufferPoolByteBuffer)) {
+                    registerWriteOperationIfNeeded();
+                    return ioThreadFuture;
                 }
-                onWriteQueued(message);
-                return ioThreadFuture;
+                onWriteQueueingFailed(enqueuedBytes);
+                return CompletableFuture.failedFuture(writeRingFull());
             }
             CompletableFuture<C> future = new CompletableFuture<>();
+            onWriteQueueing(message);
             ioThreadRequests.offerBlocking(translateSendWithFuture, message, future, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
-            onWriteQueued(message);
+            registerWriteOperationIfNeeded();
             return future;
         }
 
         @Override
         public <C> void send(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
             if (Thread.currentThread() == ioWorkerThread) {
-                if (pendingWrite.isFullyWritten()
-                        && ioThreadSender.send(message, messageSentCallback, messageSendingContext, null, ioBufferPoolByteBuffer)) {
+                if (sendInIOThread(message, messageSendingContext, messageSentCallback, ioBufferPoolByteBuffer)) {
                     return;
                 }
-                if (!offerOrDrainAndRetry(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer)) {
-                    safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, message);
+                int enqueuedBytes = onWriteQueueing(message);
+                if (offerOrDrainAndRetry(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer)) {
+                    registerWriteOperationIfNeeded();
                     return;
                 }
-                onWriteQueued(message);
+                onWriteQueueingFailed(enqueuedBytes);
+                safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, message);
                 return;
             }
+            onWriteQueueing(message);
             ioThreadRequests.offerBlocking(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
-            onWriteQueued(message);
+            registerWriteOperationIfNeeded();
         }
 
         @Override
@@ -1293,19 +1295,21 @@ class IOSessionImpl implements IOSession {
         @Override
         public void send(ByteBuffer message, boolean ioBufferPoolByteBuffer) {
             if (Thread.currentThread() == ioWorkerThread) {
-                if (pendingWrite.isFullyWritten()
-                        && ioThreadSender.send(message, null, null, null, ioBufferPoolByteBuffer)) {
+                if (sendInIOThread(message, null, null, ioBufferPoolByteBuffer)) {
                     return;
                 }
-                if (!offerOrDrainAndRetry(translateSend, message, ioBufferPoolByteBuffer)) {
-                    ioEventsListener.onWriteFailure(ioSession, message.flip());
+                int enqueuedBytes = onWriteQueueing(message);
+                if (offerOrDrainAndRetry(translateSend, message, ioBufferPoolByteBuffer)) {
+                    registerWriteOperationIfNeeded();
                     return;
                 }
-                onWriteQueued(message);
+                onWriteQueueingFailed(enqueuedBytes);
+                ioEventsListener.onWriteFailure(ioSession, message.flip());
                 return;
             }
+            onWriteQueueing(message);
             ioThreadRequests.offerBlocking(translateSend, message, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
-            onWriteQueued(message);
+            registerWriteOperationIfNeeded();
         }
 
         @Override
@@ -1324,11 +1328,11 @@ class IOSessionImpl implements IOSession {
                 if (writeWatermarkState.isEnabled()) {
                     writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
                 }
-                if (!offerOrDrainAndRetry(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext)) {
-                    safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, null);
+                if (offerOrDrainAndRetry(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext)) {
+                    registerWriteOperationIfNeeded();
                     return;
                 }
-                registerWriteOperationIfNeeded();
+                safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, null);
                 return;
             }
             if (writeWatermarkState.isEnabled()) {
@@ -1356,6 +1360,10 @@ class IOSessionImpl implements IOSession {
                 Thread.yield();
                 registerWriteOperationIfNeeded();
             }
+        }
+
+        private <C> boolean sendInIOThread(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
+            return pendingWrite.isFullyWritten() && ioThreadSender.send(message, messageSentCallback, messageSendingContext, null, ioBufferPoolByteBuffer);
         }
 
         private <A, B> boolean offerOrDrainAndRetry(RingBuffer.EventTranslatorTwoArg<IOThreadRequest, A, B> translator,
@@ -1391,12 +1399,19 @@ class IOSessionImpl implements IOSession {
             }
         }
 
-
-        private void onWriteQueued(ByteBuffer message) {
-            if (writeWatermarkState.isEnabled()) {
-                writeWatermarkState.onEnqueued(message);
+        private int onWriteQueueing(ByteBuffer message) {
+            if (!writeWatermarkState.isEnabled()) {
+                return 0;
             }
-            registerWriteOperationIfNeeded();
+            int enqueuedBytes = message.position();
+            writeWatermarkState.onEnqueued(enqueuedBytes);
+            return enqueuedBytes;
+        }
+
+        private void onWriteQueueingFailed(int enqueuedBytes) {
+            if (writeWatermarkState.isEnabled()) {
+                writeWatermarkState.onDequeued(enqueuedBytes);
+            }
         }
 
         private IOException writeRingFull() {
@@ -1424,7 +1439,7 @@ class IOSessionImpl implements IOSession {
             pendingWrite.localSendTimeInNanos = activeIOStats.getTimeInNanos(IOStats.Operation.IO_MESSAGE_WRITE);
             pendingWrite.watermarkEnqueuedBytes = message.position();
             if (writeWatermarkState.isEnabled()) {
-                writeWatermarkState.onEnqueued(message);
+                writeWatermarkState.onEnqueued(pendingWrite.watermarkEnqueuedBytes);
             }
             try {
                 writeBufferOut(pendingWrite, false, activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE));
