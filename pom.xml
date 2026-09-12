@@ -4,7 +4,7 @@
 
     <groupId>org.lolaf.betty</groupId>
     <artifactId>betty-parent</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Betty</name>
@@ -41,7 +41,7 @@
         <!-- Reproducible builds. A literal instant, never a variable reference: the pom is deployed
              to Central exactly as written on disk, and maven-release-plugin moves this in the same
              commit as the version. -->
-        <project.build.outputTimestamp>2026-09-12T16:14:26Z</project.build.outputTimestamp>
+        <project.build.outputTimestamp>2026-09-12T16:16:42Z</project.build.outputTimestamp>
         <!-- release, not source/target: nothing in betty reaches a java.base internal at compile
              time, so javac's release flag is available everywhere and a jar cannot pick up a
              post-11 method that would NoSuchMethodError on a real JDK 11. (Two dashes cannot
@@ -114,7 +114,7 @@
         <connection>scm:git:https://github.com/lolaf-org/betty.git</connection>
         <developerConnection>scm:git:https://github.com/lolaf-org/betty.git</developerConnection>
         <url>https://github.com/lolaf-org/betty</url>
-        <tag>v0.1.0</tag>
+        <tag>HEAD</tag>
     </scm>
 
     <issueManagement>
