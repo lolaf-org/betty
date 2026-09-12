@@ -146,7 +146,12 @@ public interface IOWriter {
     interface MessageSentCallback<C> {
 
         /**
-         * Called when the write operation has finished
+         * Called when the write operation has finished.
+         * <p>
+         * The buffer is lent for the duration of the call and may be read however the implementation likes: rewind it,
+         * walk it, flip it. Its position and limit are restored on return, so a protocol that stores or logs what it
+         * sent can read the message back in place rather than allocate a duplicate. Do not keep the buffer past the
+         * call - a pooled one is returned to the pool immediately afterwards, and handed to the next message.
          *
          * @param message               the message that was sent or not, may be null if message was build by a {@link ByteBufferBuilder#build()} that failed
          * @param sendingError          the exception that occurred when sending the message or null if message has been sent

@@ -103,7 +103,8 @@ public interface IOEventsListener {
      * Called when a message write has occurred using an API call without callbacks like {@link IOWriter#send(ByteBuffer, boolean)} or {@link IOWriter#send(byte[])}
      *
      * @param session the session that wrote it
-     * @param message the message as it went out; the buffer is recycled once this returns
+     * @param message the message as it went out, lent for the duration of the call: its position and limit are
+     *                restored on return, so it can be read back in place, and the buffer is recycled once this returns
      */
     default void onWrite(IOSession session, ByteBuffer message) {
 
