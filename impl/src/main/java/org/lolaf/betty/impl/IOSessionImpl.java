@@ -1248,8 +1248,7 @@ class IOSessionImpl implements IOSession {
         public <C> CompletableFuture<C> send(ByteBuffer message, C messageSendingContext, boolean ioBufferPoolByteBuffer) {
             if (Thread.currentThread() == ioWorkerThread) {
                 CompletableFuture<C> ioThreadFuture = new CompletableFuture<>();
-                if (pendingWrite.isFullyWritten()
-                        && ioThreadSender.send(message, null, messageSendingContext, ioThreadFuture, ioBufferPoolByteBuffer)) {
+                if (sendInIOThread(message, messageSendingContext, null, ioBufferPoolByteBuffer, ioThreadFuture)) {
                     return ioThreadFuture;
                 }
                 int enqueuedBytes = onWriteQueueing(message);
@@ -1270,7 +1269,7 @@ class IOSessionImpl implements IOSession {
         @Override
         public <C> void send(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
             if (Thread.currentThread() == ioWorkerThread) {
-                if (sendInIOThread(message, messageSendingContext, messageSentCallback, ioBufferPoolByteBuffer)) {
+                if (sendInIOThread(message, messageSendingContext, messageSentCallback, ioBufferPoolByteBuffer, null)) {
                     return;
                 }
                 int enqueuedBytes = onWriteQueueing(message);
@@ -1295,7 +1294,7 @@ class IOSessionImpl implements IOSession {
         @Override
         public void send(ByteBuffer message, boolean ioBufferPoolByteBuffer) {
             if (Thread.currentThread() == ioWorkerThread) {
-                if (sendInIOThread(message, null, null, ioBufferPoolByteBuffer)) {
+                if (sendInIOThread(message, null, null, ioBufferPoolByteBuffer, null)) {
                     return;
                 }
                 int enqueuedBytes = onWriteQueueing(message);
@@ -1362,8 +1361,8 @@ class IOSessionImpl implements IOSession {
             }
         }
 
-        private <C> boolean sendInIOThread(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
-            return pendingWrite.isFullyWritten() && ioThreadSender.send(message, messageSentCallback, messageSendingContext, null, ioBufferPoolByteBuffer);
+        private <C> boolean sendInIOThread(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer, CompletableFuture<?> writeFuture) {
+            return pendingWrite.isFullyWritten() && ioThreadSender.send(message, messageSentCallback, messageSendingContext, writeFuture, ioBufferPoolByteBuffer);
         }
 
         private <A, B> boolean offerOrDrainAndRetry(RingBuffer.EventTranslatorTwoArg<IOThreadRequest, A, B> translator,
