@@ -4,7 +4,7 @@
 
     <groupId>org.lolaf.betty</groupId>
     <artifactId>betty-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
     <packaging>pom</packaging>
 
     <name>Betty</name>
@@ -41,7 +41,7 @@
         <!-- Reproducible builds. A literal instant, never a variable reference: the pom is deployed
              to Central exactly as written on disk, and maven-release-plugin moves this in the same
              commit as the version. -->
-        <project.build.outputTimestamp>2026-09-01T19:13:51Z</project.build.outputTimestamp>
+        <project.build.outputTimestamp>2026-09-12T16:14:26Z</project.build.outputTimestamp>
         <!-- release, not source/target: nothing in betty reaches a java.base internal at compile
              time, so javac's release flag is available everywhere and a jar cannot pick up a
              post-11 method that would NoSuchMethodError on a real JDK 11. (Two dashes cannot
@@ -73,7 +73,7 @@
         <!-- Appended to what maven-release-plugin passes to its forked builds. It exists because
              <arguments> below is set in the pom, which makes -Darguments= on the command line a
              silently ignored no-op. -->
-        <release.extraArguments/>
+        <release.extraArguments />
         <lombok-maven-plugin.version>1.18.20.0</lombok-maven-plugin.version>
         <license-maven-plugin.version>5.1.2</license-maven-plugin.version>
         <versions-maven-plugin.version>2.21.0</versions-maven-plugin.version>
@@ -94,7 +94,7 @@
             -Xshare:off
             ${surefire.argLine.extra}
         </surefire.argLine>
-        <surefire.argLine.extra/>
+        <surefire.argLine.extra />
         <automatic.module.name>org.lolaf.betty.MODULE.NAME.NOT.SET</automatic.module.name>
         <license.source.dir>${project.basedir}/..</license.source.dir>
         <delombok.skip>false</delombok.skip>
@@ -110,13 +110,11 @@
         <module>module-path-test</module>
     </modules>
 
-    <scm child.scm.connection.inherit.append.path="false"
-         child.scm.developerConnection.inherit.append.path="false"
-         child.scm.url.inherit.append.path="false">
+    <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false" child.scm.url.inherit.append.path="false">
         <connection>scm:git:https://github.com/lolaf-org/betty.git</connection>
         <developerConnection>scm:git:https://github.com/lolaf-org/betty.git</developerConnection>
         <url>https://github.com/lolaf-org/betty</url>
-        <tag>HEAD</tag>
+        <tag>v0.1.0</tag>
     </scm>
 
     <issueManagement>
