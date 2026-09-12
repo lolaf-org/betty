@@ -108,12 +108,12 @@ java -jar target/benchmarks.jar -rf json -prof gc ClientRTTBenchmark -p clientSe
 
 Drop the JSON on <https://jmh.morethan.io/> to read it.
 
-`results/` holds the runs of 2026-09-10 and 2026-09-11, one JSON per benchmark class per run. The tables below
-are read off the 2026-09-11 pair.
+`results/` holds the runs of 2026-09-10, 2026-09-11 and 2026-09-12, one JSON per benchmark class per run. The tables
+below are read off the 2026-09-12 pair.
 
 ## Results
 
-From the run of 2026-09-11 — JMH 1.37, JDK 21.0.12.1 (Zulu), one fork, one thread, 10 s iterations (two warmup for
+From the run of 2026-09-12 — JMH 1.37, JDK 21.0.12.1 (Zulu), one fork, one thread, 10 s iterations (two warmup for
 `ClientRTTBenchmark`, three for `ClientThroughputBenchmark`, three measured in both), `-Xms8g -Xmx8g`, against
 `BenchmarkServer` over loopback with 16-byte packets. `±` is JMH's 99.9 % confidence interval and *Alloc* is
 `gc.alloc.rate.norm`.
@@ -121,11 +121,12 @@ From the run of 2026-09-11 — JMH 1.37, JDK 21.0.12.1 (Zulu), one fork, one thr
 **These are one machine and one fork,** so treat them as an illustration rather than as a specification. Both
 benchmarks pin threads to cores derived from `availableProcessors()`, so the numbers move with core count and
 hyper-threading layout and two machines are not comparable — the comparison worth having is one you ran yourself, on
-your own hardware, today. Both tables use the `JDK_STOCK` selector provider: every `JDK_EPOLL` score falls inside its
-`JDK_STOCK` counterpart's interval once both intervals are counted, so the provider is left out rather than doubling
-the tables. The 2026-09-10 run had one row where the two were far apart — betty's `STOCK` throughput, 24.52 Mops/s on
-`JDK_STOCK` against 20.83 ± 1.41 on `JDK_EPOLL`, against a `JDK_STOCK` interval of ± 4.01 that did not separate them
-either. In this run that gap is gone: 24.75 ± 0.17 and 24.60 ± 0.43.
+your own hardware, today. Both tables use the `JDK_STOCK` selector provider, which costs one row this time: betty's
+`STOCK` throughput came in at 24.99 ± 0.25 Mops/s on `JDK_STOCK` against 24.11 ± 0.68 on `JDK_EPOLL`, intervals that
+meet over about 0.05 Mops/s rather than one containing the other. That is the same row that was far apart in the
+2026-09-10 run and together in the 2026-09-11 one, which is the reading worth having: it is the row this setup
+resolves least well, not a provider that is slower. Every other pair still has its `JDK_EPOLL` score inside the
+`JDK_STOCK` interval, two of them only just.
 
 ### Round-trip latency — `ClientRTTBenchmark`
 
@@ -133,16 +134,16 @@ One message out, wait for the ack. Lower is better.
 
 | Client | Settings | µs/op | Alloc (B/op) |
 |---|---|---:|---:|
-| `aeron` | `LOW_LATENCY` | 6.89 ± 0.67 | 538.90 |
-| `NIONonBlockingBusySpin` | `LOW_LATENCY` | 8.53 ± 1.24 | 0.008 |
-| **`betty`** | **`LOW_LATENCY`** | **9.15 ± 0.23** | **0.074** |
-| `NIOBlockingBusySpin` | `LOW_LATENCY` | 11.03 ± 0.13 | 0.011 |
-| **`betty`** | **`STOCK`** | **11.76 ± 0.32** | **0.095** |
-| `netty` | `STOCK` | 12.02 ± 0.89 | 429.74 |
-| `asynchronousSocketChannel` | `STOCK` | 13.00 ± 11.22 | 164.98 |
-| `mina` | `STOCK` | 13.62 ± 1.65 | 632.02 |
-| `jetty` | `STOCK` | 22.34 ± 7.68 | 419.95 |
-| `aeron` | `STOCK` | 191.86 ± 11.24 | 0.891 |
+| `aeron` | `LOW_LATENCY` | 6.86 ± 2.60 | 534.10 |
+| **`betty`** | **`LOW_LATENCY`** | **8.72 ± 0.57** | **0.070** |
+| `NIONonBlockingBusySpin` | `LOW_LATENCY` | 8.73 ± 1.13 | 0.008 |
+| `NIOBlockingBusySpin` | `LOW_LATENCY` | 10.93 ± 0.30 | 0.010 |
+| **`betty`** | **`STOCK`** | **11.63 ± 0.32** | **0.094** |
+| `netty` | `STOCK` | 11.93 ± 1.10 | 429.89 |
+| `asynchronousSocketChannel` | `STOCK` | 13.09 ± 12.07 | 165.57 |
+| `mina` | `STOCK` | 13.64 ± 1.08 | 632.02 |
+| `jetty` | `STOCK` | 22.71 ± 28.83 | 330.73 |
+| `aeron` | `STOCK` | 191.59 ± 39.32 | 0.880 |
 
 ### Throughput — `ClientThroughputBenchmark`
 
@@ -150,42 +151,43 @@ One message out, wait for the ack. Lower is better.
 
 | Client | Settings | Mops/s | Alloc (B/op) |
 |---|---|---:|---:|
-| **`betty`** | **`LOW_LATENCY`** | **25.28 ± 0.37** | **0.00032** |
-| `NIOBlockingBusySpin` | `LOW_LATENCY` | 24.98 ± 0.47 | 0.00004 |
-| **`betty`** | **`STOCK`** | **24.75 ± 0.17** | **0.00033** |
-| `NIONonBlockingBusySpin` | `LOW_LATENCY` | 24.54 ± 0.71 | 0.00004 |
-| `netty` | `STOCK` | 23.37 ± 9.49 | 0.84 |
-| `aeron` | `LOW_LATENCY` | 16.91 ± 3.97 | 4.97 |
-| `asynchronousSocketChannel` | `STOCK` | 13.43 ± 10.45 | 0.59 |
-| `jetty` | `STOCK` | 13.20 ± 14.53 | 0.81 |
-| `aeron` | `STOCK` | 4.84 ± 0.78 | 0.00096 |
-| `mina` | `STOCK` | 3.65 ± 6.02 | 33.70 |
+| **`betty`** | **`LOW_LATENCY`** | **25.63 ± 0.44** | **0.00032** |
+| `NIOBlockingBusySpin` | `LOW_LATENCY` | 25.00 ± 0.17 | 0.00004 |
+| **`betty`** | **`STOCK`** | **24.99 ± 0.25** | **0.00032** |
+| `NIONonBlockingBusySpin` | `LOW_LATENCY` | 24.72 ± 0.44 | 0.00004 |
+| `netty` | `STOCK` | 22.00 ± 4.54 | 0.84 |
+| `aeron` | `LOW_LATENCY` | 18.06 ± 5.65 | 4.33 |
+| `jetty` | `STOCK` | 13.13 ± 11.91 | 0.80 |
+| `aeron` | `STOCK` | 4.82 ± 1.21 | 0.00096 |
+| `mina` | `STOCK` | 3.70 ± 15.23 | 33.69 |
 
-Every client completed its whole supported matrix in a single run of `run-benchmark.sh`, including
-`asynchronousSocketChannel`, which the 2026-09-10 run did not measure cleanly — it had only a `JDK_EPOLL` round-trip
-row and no throughput row at all. Its intervals here are still too wide to place it (see below), but it is measured.
+`asynchronousSocketChannel` is absent from the throughput table because this run produced no throughput row for it at
+all, in either provider, and only a `JDK_STOCK` row on round-trip. The 2026-09-10 run failed on it the other way
+round — a `JDK_EPOLL` round-trip row and no throughput row — and only 2026-09-11 measured its whole matrix. Two runs
+in three is the client's own flakiness under this harness rather than a result about it.
 
 ### Reading them
 
-- **The floor is the number that matters.** In `LOW_LATENCY` betty's round-trip is 9.15 µs against a hand-rolled
-  busy-spinning NIO client's 8.53 — a gap inside that client's own ± 1.24 interval, so this run does not separate
-  them. On throughput betty leads both hand-rolled clients, 25.28 against 24.98 and 24.54, but by less than the
-  intervals overlap: unlike the 2026-09-10 run, this one does not establish that lead. Either way the cost of using
-  the library instead of writing the selector loop yourself is at or below what the run can resolve.
-- **Only Aeron beats it on latency, and only in one configuration.** 6.89 µs against betty's 9.15, at 539 B/op and a
-  core; in `STOCK` it goes to 192 µs. Betty is ahead of it on throughput in both configurations, by 8 Mops/s in
-  `LOW_LATENCY` and fivefold in `STOCK`. Aeron also runs unpinned here — pinning the JMH thread destroys its
-  throughput, for reasons nobody has got to the bottom of.
-- **Allocation is the unambiguous win.** Betty stays at
-  0.095 B/op on round-trip and 0.00033 B/op per message on throughput, against 165–632 B/op and 0.59–33.7 B/op for
-  Netty, Jetty, Mina and the JDK's async API. The sub-byte figures are JMH averaging away one rare allocation, not a
-  fractional object: the hot path allocates nothing. Betty's two figures are also the ones that did not move between
-  the 2026-09-10 and 2026-09-11 runs — 0.073 to 0.074 B/op and 0.00033 to 0.00032 — while Aeron's `LOW_LATENCY`
-  round-trip went 473 to 539 B/op and Jetty's 342 to 420, which is what allocating on the hot path looks like from
-  one run to the next.
+- **The floor is the number that matters.** In `LOW_LATENCY` betty's round-trip is 8.72 µs against a hand-rolled
+  busy-spinning NIO client's 8.73 — betty nominally ahead, by far less than either interval, so this run separates
+  them no better than the last one did in the other direction. On throughput betty leads both hand-rolled clients,
+  25.63 against 25.00 and 24.72, but by less than the intervals overlap. Either way the cost of using the library
+  instead of writing the selector loop yourself is at or below what the run can resolve.
+- **Aeron is the only client nominally ahead on latency, and this run cannot show it.** 6.86 µs against betty's 8.72,
+  but at ± 2.60 against betty's ± 0.57 the two overlap across most of Aeron's interval — the 2026-09-11 run, at
+  ± 0.67, did separate them. It pays 534 B/op and a core for that lead, and in `STOCK` it goes to 192 µs. Betty is
+  ahead of it on throughput in both configurations, by 7.6 Mops/s in `LOW_LATENCY` and fivefold in `STOCK`. Aeron also
+  runs unpinned here — pinning the JMH thread destroys its throughput, for reasons nobody has got to the bottom of.
+- **Allocation is the unambiguous win.** Betty stays at 0.094 B/op on round-trip and 0.00032 B/op per message on
+  throughput, against 165–632 B/op on round-trip for Netty, Jetty, Mina and the JDK's async API, and 0.80–33.7 B/op
+  per message for the three of those that produced a throughput row. The sub-byte figures are JMH averaging away one
+  rare allocation, not a fractional object: the hot path allocates nothing. Betty's figures are also the ones that
+  barely move between runs — 0.073, 0.074 then 0.070 B/op on `LOW_LATENCY` round-trip, and 0.0003 per message on
+  throughput in all three — while Jetty's round-trip allocation went 342 to 420 to 331, which is what allocating on
+  the hot path looks like from one run to the next.
 - **The JDK's own async API is not the cheap way to get out of writing a selector loop.**
-  `asynchronousSocketChannel` is a microsecond behind betty's `STOCK` round-trip, with an interval wide enough that
-  the gap could be several, and allocates 165 B/op doing it — which is what the pooled-buffer machinery exists to
-  avoid.
-- **`STOCK` is close behind `LOW_LATENCY` on throughput, not on latency.** Betty gives up 0.5 Mops/s by not
-  busy-spinning but 2.6 µs of round-trip, which is the trade the select strategies exist to let you make.
+  `asynchronousSocketChannel` is a microsecond and a half behind betty's `STOCK` round-trip, with an interval wide
+  enough that the gap could be several either way, and allocates 166 B/op doing it — which is what the pooled-buffer
+  machinery exists to avoid.
+- **`STOCK` is close behind `LOW_LATENCY` on throughput, not on latency.** Betty gives up 0.6 Mops/s by not
+  busy-spinning but 2.9 µs of round-trip, which is the trade the select strategies exist to let you make.
