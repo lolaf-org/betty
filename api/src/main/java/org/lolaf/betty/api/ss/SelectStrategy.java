@@ -49,4 +49,18 @@ public interface SelectStrategy {
      * @throws IOException if the selection fails
      */
     int select(Selector selector, Consumer<SelectionKey> selectionKeyConsumer) throws IOException;
+
+    /**
+     * Applies whatever thread-level setup this strategy needs, called by the IO thread on itself before its
+     * select loop starts.
+     * <p>
+     * Most strategies need none, hence the empty default. {@link IdleStrategySelectStrategy} passes it on to its
+     * {@code IdleStrategy}, which is how a strategy that narrows the OS timer slack gets to do it on the thread
+     * that will actually park - the setting applies to the calling thread, so no other thread can do it for it.
+     *
+     * @param thread the IO thread that will run the select loop
+     */
+    default void assignToThread(Thread thread) {
+        // nothing to do
+    }
 }

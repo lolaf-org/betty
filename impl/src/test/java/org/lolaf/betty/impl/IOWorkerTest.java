@@ -22,7 +22,12 @@ import org.lolaf.betty.api.ClientBuilder;
 import org.lolaf.betty.api.io.IOEventsListener;
 import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
+import org.lolaf.betty.api.ss.IdleStrategySelectStrategy;
 import org.lolaf.ringos.Deadline;
+import org.lolaf.ringos.idling.BusySpinIdleStrategy;
+import org.lolaf.ringos.idling.IdleStrategy;
+import org.lolaf.ringos.idling.TimedWaitNotifyIdleStrategy;
+import org.lolaf.ringos.idling.WaitNotifyIdleStrategy;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -33,10 +38,13 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 /**
@@ -314,6 +322,84 @@ class IOWorkerTest {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /**
+     * {@code TimerSlackAwareBackoffIdleStrategy} narrows the OS timer slack of whichever thread calls {@code prctl},
+     * so its {@code assignToThread} is only worth anything when the IO thread itself makes the call, before it starts
+     * parking. Nothing else can do it on that thread's behalf - which is why this asserts who called, not just that
+     * someone did.
+     */
+    @Test
+    void theSelectStrategyIsAssignedToTheIOThreadBeforeItSelects() {
+        AtomicReference<Thread> assignedThread = new AtomicReference<>();
+        AtomicReference<Thread> callingThread = new AtomicReference<>();
+        AtomicBoolean assignedBeforeFirstIdle = new AtomicBoolean();
+        AtomicInteger idleCount = new AtomicInteger();
+
+        IdleStrategy recordingIdleStrategy = new IdleStrategy() {
+            @Override
+            public void idle(int workCount) {
+                idleCount.incrementAndGet();
+                Thread.onSpinWait();
+            }
+
+            @Override
+            public void idle() {
+                idleCount.incrementAndGet();
+                Thread.onSpinWait();
+            }
+
+            @Override
+            public void reset() {
+                // nothing to do
+            }
+
+            @Override
+            public void assignToThread(Thread thread) {
+                assignedBeforeFirstIdle.set(idleCount.get() == 0);
+                assignedThread.set(thread);
+                callingThread.set(Thread.currentThread());
+            }
+        };
+
+        String name = "timer-slack-worker";
+        worker = new IOWorkerImpl(name, IOWorkersGroupSettings.builder().id(name).build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder()
+                        .selectStrategy(new IdleStrategySelectStrategy(recordingIdleStrategy))
+                        .build());
+        worker.start();
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> assignedThread.get() != null);
+
+        assertThat(callingThread.get())
+                .as("the IO thread has to make the call itself - prctl sets the slack of the calling thread")
+                .isSameAs(assignedThread.get());
+        assertThat(assignedThread.get().getName()).contains(name);
+        assertThat(assignedBeforeFirstIdle).as("assigned before the loop ever idles").isTrue();
+    }
+
+    /**
+     * A select loop signals nothing - it polls and idles on what the poll found - so a strategy that waits to be told
+     * waits for good, and the worker silently stops selecting. Refused where it is configured, which is the only
+     * point at which it still looks like a mistake rather than a hang.
+     */
+    @Test
+    void aWaitNotifyIdleStrategyIsRefusedRatherThanLeftToStallTheWorker() {
+        assertThatThrownBy(() -> new IdleStrategySelectStrategy(new WaitNotifyIdleStrategy()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("WaitNotifyIdleStrategy")
+                .hasMessageContaining("stop");
+
+        assertThatThrownBy(() -> new IdleStrategySelectStrategy(new TimedWaitNotifyIdleStrategy(Duration.ofMillis(1))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("TimedWaitNotifyIdleStrategy");
+
+        assertThatThrownBy(() -> new IdleStrategySelectStrategy(null))
+                .isInstanceOf(NullPointerException.class);
+
+        assertThatCode(() -> new IdleStrategySelectStrategy(BusySpinIdleStrategy.getInstance()))
+                .doesNotThrowAnyException();
     }
 
     private static class CountingListener implements IOEventsListener {

@@ -14,34 +14,35 @@ strategies that let you choose where on the CPU-burn / wake-up-latency curve you
   primitives, and on SLF4J. Nothing else.
 - **Apache License 2.0.**
 
-## Why it exists
+## Why another network library
 
-Betty comes out of low-latency work in finance: the transport is TCP, the latency and throughput targets are numbers
-somebody signed up to, and you hit them by tuning — how the selector waits for readiness, which core serves a session,
-how much of the machine you will burn to take a microsecond off. The two libraries that dominate that space do not
-leave those dials where you can reach them.
+Betty was written for one requirement: the lowest latency and the least memory allocation a TCP transport library can manage
+on a stock JVM. That is what the low-latency finance space asks of one, where the targets are numbers somebody signed
+up to, and you hit them by tuning — how the selector waits for readiness, which core serves a session, how much of the
+machine you will burn to take a microsecond off. The two libraries that dominate that space do not leave those dials
+where you can reach them.
 
-**Netty** will not busy-spin a selector — the [parameter matrix](benchmarks/README.md) cannot even run it in
-`LOW_LATENCY`, because there is no such configuration — so you block in `select()`, pay the wake-up on every
-cross-thread write, and allocate about 430 B per round trip.
+**Netty** will not busy-spin a selector, so you block in `select()`, pay the wake-up on every cross-thread write,
+and allocate on every round trip.
 
-**Aeron** is the only client here that beats betty on latency, at 6.89 µs, and that is exactly what you should expect:
-it is not TCP. It puts its own reliable delivery over UDP, so this is two different transports being compared, not two
-implementations of the same one. A connection is bidirectional the moment TCP gives it to you; in Aeron each direction
-is a separate publication and subscription you have to configure, address and operate, so a request/response link is
-two one-way streams you set up yourself. Adopting it means adopting that protocol, its media driver and its
-operational model at both ends of every link, for 539 B/op and a core it does not give back.
+**Aeron** is the only client here that beats betty on latency, and that is exactly what you should expect: it is not
+TCP — nor is it plain UDP, but a lightweight TCP-like reliable protocol of its own built over UDP. So this is two
+different transports being compared, not two implementations of the same one. A connection is bidirectional the moment
+TCP gives it to you; in Aeron each direction is a separate publication and subscription you have to configure, address
+and operate, so a request/response link is two one-way streams you set up yourself. Adopting it means adopting that
+protocol, its media driver and its operational model at both ends of every link — fine where both ends are yours,
+disqualifying where they are not. A TCP port can be dialled by anything: another language, a stock client library,
+somebody else's gateway, a counterparty who was told a host and a port and nothing else. An Aeron endpoint can only be
+reached by another Aeron, so a public API is not something you serve over it.
 
-Below both is kernel bypass — a NIC you have to specify, DPDK, TCP moved into userspace — which does go lower, and
+Below both is kernel bypass — a NIC you have to buy for it, DPDK, TCP moved into userspace — which does go lower, and
 costs you being stock. Betty stops deliberately on this side of that line: a standard JVM, its host OS's TCP stack,
 hardware nobody had to requisition.
 
-What that buys, over loopback with 16-byte packets: 11.76 µs and 24.75 Mops/s blocking in `select()`, 9.15 µs and
-25.28 Mops/s busy-spinning — the strategy chosen per thread group rather than per process, so the handful of sessions
-that matter get a core and the rest give theirs back. And 0.095 B per round trip, 0.00033 B per message on the
-throughput benchmark, against 165–632 B/op for Netty, Mina, Jetty and the JDK's own async API. Allocating is not
-itself slow, but everything allocated is eventually collected, and a collection is a pause you did not schedule and
-will meet again at the far end of the distribution you are actually judged on.
+What that buys is a client that allocates essentially nothing per operation, where every library above allocates on
+every one. Allocating is not itself slow, but everything allocated is eventually collected, and a collection is a
+pause you did not schedule. [`benchmarks/README.md`](benchmarks/README.md) has the round-trip, throughput and
+allocation tables, and what each number does and does not support.
 
 The rest of the API is there so you can tune with numbers instead of guesses: a receive timestamp handed to `onRead`,
 `IOStats` hooks that timestamp every hop so a latency budget can be attributed rather than guessed at, and a load
@@ -120,8 +121,20 @@ interface rather than passing a lambda when you want them.
 
 ### The buffer contract
 
-The `ByteBuffer` handed to `onRead` belongs to the pool and is recycled the moment the callback returns. Read what you
-need inside the callback, or copy it. Retaining one is the one mistake that will bite you.
+Betty reads and writes `java.nio.ByteBuffer`, the JDK's own type — there is no `ByteBuf`, no `IoBuffer`, no
+`UnsafeBuffer` to learn, and nothing to convert at the boundary. Netty, Mina and Aeron each define a buffer type of
+their own, so a payload on its way to anything that speaks the standard API — a `CharsetDecoder`, a `MessageDigest`,
+an SBE or protobuf codec, a `FileChannel` — leaves their world through a wrapper call or a copy. Here it is already
+the type those APIs take. Buffers from [`IOWriter#borrow(int)`](api/src/main/java/org/lolaf/betty/api/io/IOWriter.java)
+come from the session's [`IOBufferPool`](api/src/main/java/org/lolaf/betty/api/io/IOBufferPool.java) and are direct by
+default (`IOBufferPoolSettings.directBuffers`), as is the read buffer (`IOSettings.readDirectBuffer`), so neither a
+read nor a write pays the JDK's own heap-to-direct staging copy either.
+
+There is no reference counting to get wrong. The `ByteBuffer` handed to
+[`IOEventsListener#onRead`](api/src/main/java/org/lolaf/betty/api/io/IOEventsListener.java) is the session's own read
+buffer, which the next read overwrites, and a buffer borrowed for a write goes back to the pool on its own once the
+write completes or fails. Read what you need inside the callback, or copy it. Retaining one is the one mistake that
+will bite you.
 
 ## Examples
 
@@ -171,6 +184,22 @@ averaged over a cycle it sends at exactly the rate the client reads.
 It is set on an `IOThreadGroup`, not on the whole `IOWorkersGroup`, so one client or server can spend a core on the
 thread group carrying the sessions that matter and block on the rest. Unset, a thread group gets
 `WakeupSelectStrategy` with a 10 ms timeout.
+
+### Which idle strategy
+
+`IdleStrategySelectStrategy` takes a ringos `IdleStrategy`, consulted after every `selectNow()` pass with the number
+of keys that pass found — so the select strategy picks *whether* to block and the idle strategy picks *how hard to
+wait*. Four of the six ringos ships suit a selector loop:
+
+| Idle strategy | Behaviour | Cost while idle |
+|---|---|---|
+| `BusySpinIdleStrategy` | One `Thread.onSpinWait()`. Readiness is seen on the next pass, tens of nanoseconds later — the reason to choose this select strategy at all | A whole core, traffic or not |
+| `YieldingIdleStrategy` | One `Thread.yield()`: offers the core to anything else runnable, but never parks, so a wake-up is a scheduler decision away rather than a timer away | A core, unless something else wants it |
+| `BackoffIdleStrategy` | Escalates — spins, then yields, then parks for a period that doubles up to a ceiling. A pass that finds a ready key resets it to spinning. The no-arg constructor defaults to 10 spins, 5 yields and parks doubling from 50 µs to 1 ms; the four-arg one sets `maxSpins`, `maxYields`, `minParkPeriodNs` and `maxParkPeriodNs` yourself | Almost nothing once quiet, for up to the park ceiling in wake-up delay |
+| `TimerSlackAwareBackoffIdleStrategy` | The same escalation and the same two constructors, and it narrows the thread's OS timer slack through `prctl` so a `minParkPeriodNs` under 50 µs is not rounded back up to it. Linux only | As `BackoffIdleStrategy` |
+
+The other two, `WaitNotifyIdleStrategy` and `TimedWaitNotifyIdleStrategy`, park until a `wakeup()` a select loop
+never sends, so `IdleStrategySelectStrategy` rejects them in its constructor.
 
 ## Load balancing sessions across workers
 

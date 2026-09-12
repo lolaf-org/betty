@@ -157,8 +157,8 @@ public final class PingPongExample {
         @Override
         public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
             while (message.remaining() >= FRAME_SIZE) {
-                // `message` belongs to the pool and is recycled the moment this method returns: read it here,
-                // never keep a reference to it
+                // `message` is the session's read buffer and the next read overwrites it: read it here, never
+                // keep a reference to it
                 long roundTripInNanos = System.nanoTime() - message.getLong();
                 log.info("pong seq={} rtt={}us", message.getLong(), TimeUnit.NANOSECONDS.toMicros(roundTripInNanos));
             }

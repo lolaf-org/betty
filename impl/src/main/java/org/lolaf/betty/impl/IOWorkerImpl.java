@@ -305,6 +305,9 @@ class IOWorkerImpl implements IOWorker {
     }
 
     private void runLoop() {
+        // on the IO thread and before the first select: an idle strategy that narrows the OS timer slack sets it on
+        // whichever thread calls it, so this is the only place that can do it for the thread that will park
+        selectStrategy.assignToThread(Thread.currentThread());
         log.info("IO Worker thread {} started", Thread.currentThread().getName());
         while (running.get()) {
             try {

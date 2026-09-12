@@ -16,13 +16,14 @@
 /**
  * A connection and everything an application does with it: {@link org.lolaf.betty.api.io.IOSession}, the
  * {@link org.lolaf.betty.api.io.IOEventsListener} callbacks it reports through, the
- * {@link org.lolaf.betty.api.io.IOWriter} it sends on, and the threads it runs on -
- * {@link org.lolaf.betty.api.io.IOWorker} and {@link org.lolaf.betty.api.io.IOWorkersGroup}.
+ * {@link org.lolaf.betty.api.io.IOWriter} it sends on, the {@link org.lolaf.betty.api.io.IOBufferPool} that writer
+ * borrows from, and the threads it runs on - {@link org.lolaf.betty.api.io.IOWorker} and
+ * {@link org.lolaf.betty.api.io.IOWorkersGroup}.
  * <p>
  * Every callback here runs on the IO thread that owns the session, so what they do is what that thread costs.
  * The two rules that follow are the ones worth knowing before writing any of them: the {@code ByteBuffer} handed to
- * {@code onRead} belongs to the {@link org.lolaf.betty.api.io.IOBufferPool} and is recycled when the callback
- * returns, and a {@link org.lolaf.betty.api.io.ReleasableMessageSendingContext} is released by betty once its write
- * is over rather than by the application.
+ * {@code onRead} is the session's own read buffer, which the next read overwrites, and a
+ * {@link org.lolaf.betty.api.io.ReleasableMessageSendingContext} is released by betty once its write is over rather
+ * than by the application.
  */
 package org.lolaf.betty.api.io;

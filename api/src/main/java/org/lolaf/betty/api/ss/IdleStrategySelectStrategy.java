@@ -17,10 +17,13 @@ package org.lolaf.betty.api.ss;
 
 import lombok.Value;
 import org.lolaf.ringos.idling.IdleStrategy;
+import org.lolaf.ringos.idling.TimedWaitNotifyIdleStrategy;
+import org.lolaf.ringos.idling.WaitNotifyIdleStrategy;
 
 import java.io.IOException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -39,9 +42,31 @@ public class IdleStrategySelectStrategy implements SelectStrategy {
      */
     IdleStrategy idleStrategy;
 
+    /**
+     * @param idleStrategy how the IO thread waits between passes
+     * @throws NullPointerException     if {@code idleStrategy} is {@code null}
+     * @throws IllegalArgumentException if it is one of the wait/notify strategies, which park until a
+     *                                  {@code wakeup()} this strategy never sends
+     */
+    public IdleStrategySelectStrategy(IdleStrategy idleStrategy) {
+        Objects.requireNonNull(idleStrategy, "idleStrategy");
+        if (idleStrategy instanceof WaitNotifyIdleStrategy || idleStrategy instanceof TimedWaitNotifyIdleStrategy) {
+            throw new IllegalArgumentException(idleStrategy.getClass().getSimpleName() + " cannot drive a select "
+                    + "loop: it parks until wakeup() and nothing wakes it here, so the IO thread would stop "
+                    + "polling. Use BusySpinIdleStrategy, YieldingIdleStrategy or BackoffIdleStrategy, or "
+                    + "WakeupSelectStrategy if the point is to block");
+        }
+        this.idleStrategy = idleStrategy;
+    }
+
     @Override
     public boolean requireSelectorWakeup() {
         return false;
+    }
+
+    @Override
+    public void assignToThread(Thread thread) {
+        idleStrategy.assignToThread(thread);
     }
 
     @Override

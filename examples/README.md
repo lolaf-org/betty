@@ -29,8 +29,8 @@ configuration this example deliberately does not have.
 Everything not needed to show a round trip is left at its default: no SSL, no buffer-pool sizing, no select
 strategy, no thread affinity. What the example is actually there to show is three things.
 
-**The buffer contract.** The `ByteBuffer` handed to `onRead` belongs to the pool and is recycled the moment the
-callback returns. Read it inside the callback or copy it; never retain it.
+**The buffer contract.** The `ByteBuffer` handed to `onRead` is the session's own read buffer, which the next read
+overwrites. Read it inside the callback or copy it; never retain it.
 
 **Framing.** TCP is a stream, so a read can carry several frames or stop part way through one. Both listeners
 consume whole frames only:
