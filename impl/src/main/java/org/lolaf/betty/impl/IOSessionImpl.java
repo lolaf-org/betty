@@ -821,6 +821,9 @@ class IOSessionImpl implements IOSession {
     private <C> void safelyProcessCallback(MessageSentCallback<C> messageSentCallback, C messageSendingContext,
                                            ByteBuffer bufferOut, CompletableFuture<C> writeFuture, long localSendTimeInNanos) {
         long methodCallStartTimeInNanos = activeIOStats.getTimeInNanos(IOStats.Operation.IO_EVENTS_LISTENER_ON_WRITE);
+        // whoever is handed the message has to walk it to read what was sent, track adn restore afterwards the position and limits
+        int position = bufferOut.position();
+        int limit = bufferOut.limit();
         try {
             if (messageSentCallback != null) {
                 messageSentCallback.onMessageWriteCallback(bufferOut, null, messageSendingContext);
@@ -834,6 +837,7 @@ class IOSessionImpl implements IOSession {
         }
         activeIOStats.onIOEventsListenerOnWriteCallback(this, messageSendingContext, methodCallStartTimeInNanos);
         activeIOStats.onMessageSent(this, bufferOut, messageSendingContext, localSendTimeInNanos);
+        bufferOut.limit(limit).position(position);
         releaseSendingContext(messageSendingContext);
     }
 
