@@ -14,10 +14,12 @@ between releases. A section is written when the version it belongs to is being c
 carries the right number and date the first time and the workflow's check has exactly one heading it
 could mean.
 
-Betty starts at `0.1.0` rather than `1.0.0`: the `IOEventsListener` and `IOSession` surface still has
-planned changes, and `0.x` keeps them from each costing a major version.
+Betty starts at `0.9.0` rather than `1.0.0`: the `IOEventsListener` and `IOSession` surface still has
+planned changes, and `0.x` keeps them from each costing a major version. It is the number
+[ringos](https://github.com/lolaf-org/ringos) started at, for the same reason - the two are released against each
+other and it is easier to reason about them when their version numbers say the same thing.
 
-## [0.1.0] - 2026-09-12
+## [0.9.0] - 2026-09-12
 
 First public release. Betty is asynchronous NIO networking for Java that must not allocate or block on its hot path -
 the transport under a low-latency trading stack. It runs on Java 11 or later, is compiled to Java 11 bytecode, and
@@ -54,4 +56,4 @@ depends on [ringos](https://github.com/lolaf-org/ringos) and SLF4J and nothing e
   not time an operation returns a constant and no clock call is made for it, so measurement is genuinely free when it
   is off. A receive timestamp is handed to `onRead` under its own setting.
 
-[0.1.0]: https://github.com/lolaf-org/betty/releases/tag/v0.1.0
+[0.9.0]: https://github.com/lolaf-org/betty/releases/tag/v0.9.0
