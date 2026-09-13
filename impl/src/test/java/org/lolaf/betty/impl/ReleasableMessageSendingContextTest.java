@@ -21,6 +21,7 @@ import org.lolaf.betty.api.io.ReleasableMessageSendingContext;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -74,6 +75,48 @@ class ReleasableMessageSendingContextTest extends AbstractTest {
 
         await().untilAsserted(() -> assertThat(context.releases).hasValue(1));
         assertThat(reportedError.get()).isInstanceOf(IOException.class).hasMessage("cannot build");
+    }
+
+    /**
+     * A socket that refuses the write fails the message the same way a builder that throws does: the sender is told,
+     * with the exception, and is told once. What makes it once is that the failed message is given up rather than kept
+     * as a remainder to resume - a kept one is written again on the next cycle, or reported again when the session is
+     * torn down, and either hands back a context already released to its pool.
+     */
+    @Test
+    void releasesTheContextWhenTheSocketWriteFails() {
+        setupTestEnvAndWaitForConnections();
+        IOSessionImpl session = (IOSessionImpl) clientIOsession;
+        Context context = new Context();
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicReference<Exception> reportedError = new AtomicReference<>();
+
+        // shut the write half from the IO thread itself, so the send right after it is the first thing the socket
+        // refuses: nothing else has had a chance to fail, and no other thread is between the two
+        session.processTask(() -> {
+            try {
+                session.getSocket().shutdownOutput();
+            } catch (IOException ex) {
+                throw new IllegalStateException(ex);
+            }
+            session.send(ByteBuffer.allocate(PAYLOAD.length()).put(PAYLOAD.getBytes()), context,
+                    (message, sendingError, sendingContext) -> {
+                        callbacks.incrementAndGet();
+                        reportedError.set(sendingError);
+                    }, false);
+        });
+
+        await().untilAsserted(() -> assertThat(callbacks).hasValue(1));
+        // what the socket refused the write with, and not the EOFException the teardown reports a write it cancels
+        // with: a message left parked by a write that told nobody would be reported by that path instead, and the
+        // count alone cannot tell the two apart
+        assertThat(reportedError.get()).isInstanceOf(ClosedChannelException.class);
+        // a retry or a teardown notification is a cycle away, so hold the assertion open rather than read it the
+        // instant it first passes
+        await().during(Duration.ofMillis(500)).untilAsserted(() -> {
+            assertThat(callbacks).hasValue(1);
+            assertThat(context.releases).hasValue(1);
+        });
     }
 
     /**
