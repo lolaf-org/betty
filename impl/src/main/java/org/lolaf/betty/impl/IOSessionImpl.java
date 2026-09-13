@@ -705,24 +705,14 @@ class IOSessionImpl implements IOSession {
 
     private int processIOWriteOperationForByteBufferBuilder(long localWriteStartTimeInNanos) throws IOException {
         ByteBufferBuilder bbb = localIOThreadRequest.byteBufferBuilder;
-        // built inside the try: a builder that throws is a failed write like any other, and its caller has to be
-        // told and its sending context released
         ByteBuffer bufferOut = null;
         try {
             localIOThreadRequest.watermarkEnqueuedBytes = bbb.getEstimatedByteBufferSize();
-            bufferOut = bbb.build();
+            bufferOut = build(bbb);
             // from here the built buffer is the write, so a partial one resumes as an ordinary buffer
             localIOThreadRequest.byteBuffer = bufferOut;
             localIOThreadRequest.ioBufferPoolByteBuffer = bbb.isPooledByteBuffer();
             return writeBufferOut(localIOThreadRequest, false, localWriteStartTimeInNanos);
-        } catch (IOException ex) {
-            safelyProcessCallbackOnIOException(ex,
-                    localIOThreadRequest.writeFuture,
-                    localIOThreadRequest.messageSentCallback,
-                    localIOThreadRequest.messageSendingContext,
-                    bufferOut);
-            discardRemaining(bufferOut);
-            throw ex;
         } finally {
             localIOThreadRequest.byteBufferBuilder = null;
             if (bufferOut != null && bufferOut.hasRemaining()) {
@@ -742,14 +732,6 @@ class IOSessionImpl implements IOSession {
         try {
             localIOThreadRequest.watermarkEnqueuedBytes = bufferOut.position();
             return writeBufferOut(localIOThreadRequest, false, localWriteStartTime);
-        } catch (IOException ex) {
-            safelyProcessCallbackOnIOException(ex,
-                    localIOThreadRequest.writeFuture,
-                    localIOThreadRequest.messageSentCallback,
-                    localIOThreadRequest.messageSendingContext,
-                    bufferOut);
-            discardRemaining(bufferOut);
-            throw ex;
         } finally {
             if (bufferOut.hasRemaining()) {
                 pendingWrite.transferFromPoll(localIOThreadRequest);
@@ -768,14 +750,6 @@ class IOSessionImpl implements IOSession {
         boolean pooledBuffer = pendingWrite.ioBufferPoolByteBuffer;
         try {
             return writeBufferOut(pendingWrite, true, localWriteStartTime);
-        } catch (IOException ex) {
-            safelyProcessCallbackOnIOException(ex,
-                    pendingWrite.writeFuture,
-                    pendingWrite.messageSentCallback,
-                    pendingWrite.messageSendingContext,
-                    bufferOut);
-            discardRemaining(bufferOut);
-            throw ex;
         } finally {
             if (!bufferOut.hasRemaining()) {
                 if (pooledBuffer) {
@@ -788,10 +762,25 @@ class IOSessionImpl implements IOSession {
         }
     }
 
+    private ByteBuffer build(ByteBufferBuilder byteBufferBuilder) throws IOException {
+        try {
+            return byteBufferBuilder.build();
+        } catch (IOException ex) {
+            reportWriteFailure(localIOThreadRequest, ex);
+            throw ex;
+        }
+    }
+
     private int writeBufferOut(IOThreadRequest request, boolean resuming, long localWriteStartTime) throws IOException {
         ByteBuffer bufferOut = request.byteBuffer;
         int consumedBefore = resuming ? bufferOut.position() : 0;
-        int bytesWritten = resuming ? continueWriteToSocket(bufferOut) : writeToSocket(bufferOut);
+        int bytesWritten;
+        try {
+            bytesWritten = resuming ? continueWriteToSocket(bufferOut) : writeToSocket(bufferOut);
+        } catch (IOException ex) {
+            reportWriteFailure(request, ex);
+            throw ex;
+        }
         activeIOStats.onSocketWrite(this, bytesWritten, localWriteStartTime);
         boolean complete = !bufferOut.hasRemaining();
         if (writeWatermarkState.isEnabled()) {
@@ -839,6 +828,12 @@ class IOSessionImpl implements IOSession {
         activeIOStats.onMessageSent(this, bufferOut, messageSendingContext, localSendTimeInNanos);
         bufferOut.limit(limit).position(position);
         releaseSendingContext(messageSendingContext);
+    }
+
+    private void reportWriteFailure(IOThreadRequest request, IOException ex) {
+        safelyProcessCallbackOnIOException(ex, request.writeFuture, request.messageSentCallback,
+                request.messageSendingContext, request.byteBuffer);
+        discardRemaining(request.byteBuffer);
     }
 
     private <C> void safelyProcessCallbackOnIOException(IOException ex, CompletableFuture<C> writeFuture, MessageSentCallback<C> messageSentCallback, C messageSendingContext, ByteBuffer bufferOut) {
@@ -1447,8 +1442,8 @@ class IOSessionImpl implements IOSession {
             try {
                 writeBufferOut(pendingWrite, false, activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE));
             } catch (IOException ex) {
-                safelyProcessCallbackOnIOException(ex, writeFuture, messageSentCallback, messageSendingContext, message);
-                discardRemaining(message);
+                // writeBufferOut has told the caller already: send() is not declared to throw, so unlike the write
+                // cycle this one has nowhere to rethrow it to, and the cleanup below is the whole of what is left
             } finally {
                 if (message.hasRemaining()) {
                     registerWriteOperationIfNeeded();

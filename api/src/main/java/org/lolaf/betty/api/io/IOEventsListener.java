@@ -114,7 +114,7 @@ public interface IOEventsListener {
      * Called when a message write failure has occurred using an API call without callbacks like {@link IOWriter#send(ByteBuffer, boolean)} or {@link IOWriter#send(byte[])}
      *
      * @param session the session that failed to write
-     * @param message the message that did not go out
+     * @param message the message that did not go out, may be null if message was build by a {@link IOWriter.ByteBufferBuilder#build()} that failed
      */
     default void onWriteFailure(IOSession session, ByteBuffer message) {
 
