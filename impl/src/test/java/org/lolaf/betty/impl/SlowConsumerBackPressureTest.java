@@ -21,6 +21,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.lolaf.betty.api.ClientBuilder;
 import org.lolaf.betty.api.ServerBuilder;
 import org.lolaf.betty.api.io.IOSession;
+import org.lolaf.betty.api.io.ReleasableMessageSendingContext;
 import org.lolaf.betty.api.settings.IOBufferPoolSettings;
 import org.lolaf.betty.api.settings.IOSettings;
 import org.lolaf.ringos.Deadline;
@@ -28,21 +29,18 @@ import org.lolaf.ringos.Deadline;
 import java.net.SocketOption;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-/**
- * A peer that stops reading closes its receive window, and the socket then takes part of a message or none of it. The
- * session has to survive that, keep the unwritten remainder, and hand the stream over unchanged once the peer reads
- * again - and the watermark pair has to report both edges so an application can stop producing in between.
- */
 class SlowConsumerBackPressureTest extends AbstractTest {
-    
+
     private static final int CHUNK_SIZE = 16 * 1024;
 
     private static final int CHUNKS = 32;
@@ -53,42 +51,15 @@ class SlowConsumerBackPressureTest extends AbstractTest {
 
     private static final int SOCKET_BUFFER_SIZE = 32 * 1024;
 
-    /** Larger than the send and receive buffers together, so the socket can never take it in one write. */
+    /**
+     * Larger than the send and receive buffers together, so the socket can never take it in one write.
+     */
     private static final int PARTIAL_WRITE_CHUNK_SIZE = 8 * SOCKET_BUFFER_SIZE;
 
     /**
      * Every chunk has to fit in the ring and in the pool at once, or the sender blocks before the watermark fires.
      */
     private static final int WRITES_IN_FLIGHT = 64;
-
-    /**
-     * A task runs on the IO thread inside the write cycle, so its {@code send} goes straight to the socket. The first
-     * one here is larger than the socket buffers can hold, so it is always written in part, and the second is made by
-     * the same task right after it: nothing else decides their order, and the remainder of the first has to reach the
-     * socket before any of the second.
-     */
-    @ParameterizedTest
-    @MethodSource("getTestParams")
-    void sendFromATaskKeepsItsPlaceInTheStream(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
-        WatermarkListener serverListener = new WatermarkListener();
-        SequenceCheckingListener clientListener = new SequenceCheckingListener();
-        setupTestEnvAndWaitForConnections(
-                clientBuilder.toBuilder().ioEventsListener(clientListener).ioSettings(consumerSettings()).build(),
-                serverBuilder.toBuilder().ioEventsListener(serverListener).ioSettings(producerSettings()).build());
-
-        clientIOsession.pause(Deadline.immediate());
-        AtomicLong sequence = new AtomicLong();
-        serverClientIOsession.processTask(() -> {
-            sendChunk(serverClientIOsession, sequence, PARTIAL_WRITE_CHUNK_SIZE);
-            sendChunk(serverClientIOsession, sequence, CHUNK_SIZE);
-        });
-
-        clientIOsession.resume();
-
-        await().untilAsserted(() -> assertThat(clientListener.getBytesRead())
-                .hasValue((long) PARTIAL_WRITE_CHUNK_SIZE + CHUNK_SIZE));
-        assertThat(clientListener.getCorruption()).isNull();
-    }
 
     private static void sendChunks(IOSession session) {
         sendChunks(session, new AtomicLong(), CHUNKS);
@@ -101,11 +72,15 @@ class SlowConsumerBackPressureTest extends AbstractTest {
     }
 
     private static void sendChunk(IOSession session, AtomicLong sequence, int size) {
+        session.send(chunk(session, sequence, size), true);
+    }
+
+    private static ByteBuffer chunk(IOSession session, AtomicLong sequence, int size) {
         ByteBuffer buffer = session.borrow(size);
         while (buffer.remaining() >= Long.BYTES) {
             buffer.putLong(sequence.getAndIncrement());
         }
-        session.send(buffer, true);
+        return buffer;
     }
 
     private static IOSettings producerSettings() {
@@ -135,6 +110,67 @@ class SlowConsumerBackPressureTest extends AbstractTest {
 
     @ParameterizedTest
     @MethodSource("getTestParams")
+    void sendFromATaskKeepsItsPlaceInTheStream(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
+        WatermarkListener serverListener = new WatermarkListener();
+        SequenceCheckingListener clientListener = new SequenceCheckingListener();
+        setupTestEnvAndWaitForConnections(
+                clientBuilder.toBuilder().ioEventsListener(clientListener).ioSettings(consumerSettings()).build(),
+                serverBuilder.toBuilder().ioEventsListener(serverListener).ioSettings(producerSettings()).build());
+
+        clientIOsession.pause(Deadline.immediate());
+        AtomicLong sequence = new AtomicLong();
+        serverClientIOsession.processTask(() -> {
+            sendChunk(serverClientIOsession, sequence, PARTIAL_WRITE_CHUNK_SIZE);
+            sendChunk(serverClientIOsession, sequence, CHUNK_SIZE);
+        });
+
+        clientIOsession.resume();
+
+        await().untilAsserted(() -> assertThat(clientListener.getBytesRead())
+                .hasValue((long) PARTIAL_WRITE_CHUNK_SIZE + CHUNK_SIZE));
+        assertThat(clientListener.getCorruption()).isNull();
+    }
+
+    @ParameterizedTest
+    @MethodSource("getTestParams")
+    void aWriteSplitAcrossCyclesNotifiesTheCallbackOnce(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
+        SequenceCheckingListener clientListener = new SequenceCheckingListener();
+        setupTestEnvAndWaitForConnections(
+                clientBuilder.toBuilder().ioEventsListener(clientListener).ioSettings(consumerSettings()).build(),
+                serverBuilder.toBuilder().ioEventsListener(new TestIOEventsListener()).ioSettings(producerSettings()).build());
+
+        clientIOsession.pause(Deadline.immediate());
+        AtomicInteger callbacks = new AtomicInteger();
+        CountingContext context = new CountingContext();
+        AtomicBoolean sendReturned = new AtomicBoolean();
+        // on the IO thread send writes straight to the socket, so by the time it returns the first write has been
+        // attempted - and a completed one would have run the callback inline, on this thread, before that
+        serverClientIOsession.processTask(() -> {
+            serverClientIOsession.send(chunk(serverClientIOsession, new AtomicLong(), PARTIAL_WRITE_CHUNK_SIZE),
+                    context, (message, sendingError, sendingContext) -> callbacks.incrementAndGet(), true);
+            sendReturned.set(true);
+        });
+
+        await().untilAsserted(() -> assertThat(sendReturned).isTrue());
+        // the socket cannot have taken a chunk this size in one write, so the message is half out and nobody has
+        // been told it was sent
+        assertThat(callbacks).hasValue(0);
+        assertThat(context.releases).hasValue(0);
+
+        clientIOsession.resume();
+
+        await().untilAsserted(() -> assertThat(clientListener.getBytesRead()).hasValue((long) PARTIAL_WRITE_CHUNK_SIZE));
+        // a second notification would come on the write cycle after the one that finished the message, so hold the
+        // assertion open rather than read it the instant it first passes
+        await().during(Duration.ofMillis(500)).untilAsserted(() -> {
+            assertThat(callbacks).hasValue(1);
+            assertThat(context.releases).hasValue(1);
+        });
+        assertThat(clientListener.getCorruption()).isNull();
+    }
+
+    @ParameterizedTest
+    @MethodSource("getTestParams")
     void consumerThatStopsReadingThrottlesTheWriterAndKeepsTheSession(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
         WatermarkListener serverListener = new WatermarkListener();
         SequenceCheckingListener clientListener = new SequenceCheckingListener();
@@ -155,6 +191,16 @@ class SlowConsumerBackPressureTest extends AbstractTest {
         assertThat(clientListener.getCorruption()).isNull();
         await().untilAsserted(() -> assertThat(serverListener.getLowWatermarkEvents()).hasPositiveValue());
         assertThat(serverClientIOsession.isStarted()).isTrue();
+    }
+
+    private static final class CountingContext implements ReleasableMessageSendingContext {
+
+        private final AtomicInteger releases = new AtomicInteger();
+
+        @Override
+        public void release() {
+            releases.incrementAndGet();
+        }
     }
 
     @Getter
