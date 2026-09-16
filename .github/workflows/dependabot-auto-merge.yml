@@ -19,7 +19,7 @@ jobs:
       # Reads what the pull request actually updates, so a major arriving through a route dependabot.yml
       # does not cover is left for a human rather than merged by omission.
       - id: metadata
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
