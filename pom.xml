@@ -76,7 +76,7 @@
         <release.extraArguments />
         <lombok-maven-plugin.version>1.18.20.0</lombok-maven-plugin.version>
         <license-maven-plugin.version>5.1.2</license-maven-plugin.version>
-        <versions-maven-plugin.version>2.21.0</versions-maven-plugin.version>
+        <versions-maven-plugin.version>2.22.0</versions-maven-plugin.version>
 
         <!-- Assembled once here so a module can add to it without restating it. A module must never
              declare its own <argLine>: that replaces this set wholesale and the pieces left out
