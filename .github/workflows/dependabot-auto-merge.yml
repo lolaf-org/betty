@@ -11,4 +11,4 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: lolaf-org/workflows/.github/workflows/dependabot-auto-merge.yml@92415a608b0e69c8610cc34e62502c174665d36f
+    uses: lolaf-org/workflows/.github/workflows/dependabot-auto-merge.yml@v1.0.0

@@ -18,4 +18,4 @@ jobs:
   # betty builds and tests in about a minute locally; the default 20-minute ceiling is for a cold runner.
   # One JDK: no betty module declares a toolchain, so maven.compiler.release=11 covers the whole reactor.
   build:
-    uses: lolaf-org/workflows/.github/workflows/maven-build.yml@92415a608b0e69c8610cc34e62502c174665d36f
+    uses: lolaf-org/workflows/.github/workflows/maven-build.yml@v1.0.0
