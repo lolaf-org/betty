@@ -16,8 +16,6 @@ on:
         required: false
         default: false
         type: boolean
-      # Recovery, not routine. If prepare pushed and perform then failed, the tag is real and only the
-      # deployment is missing
       performOnly:
         description: 'Skip prepare and deploy an existing tag (set tag below)'
         required: false
@@ -36,17 +34,13 @@ permissions:
   contents: read
 
 jobs:
-  # Everything else - checkout with the release token, the changelog gate, signing, prepare, perform and the
-  # GitHub Release - is in the shared workflow. It needs CI_GITHUB_TOKEN, the three GPG_* secrets and the two
-  # CENTRAL_TOKEN_* secrets, all org secrets shared with this repository.
   release:
-    uses: lolaf-org/workflows/.github/workflows/maven-release.yml@v1.0.0
+    uses: lolaf-org/workflows/.github/workflows/maven-release.yml@v1.0.1
     with:
       release-version: ${{ inputs.releaseVersion }}
       development-version: ${{ inputs.developmentVersion }}
       dry-run: ${{ inputs.dryRun }}
       perform-only: ${{ inputs.performOnly }}
       tag: ${{ inputs.tag }}
-      # One JDK: no betty module declares a toolchain, so there is nothing for a second JDK to serve.
       timeout-minutes: 45
     secrets: inherit

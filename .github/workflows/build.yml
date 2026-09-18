@@ -5,7 +5,6 @@ on:
     branches: [ main ]
   pull_request:
 
-# A superseded run on a pull request is not worth runner minutes, but every commit landing on main gets verified.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -14,8 +13,5 @@ permissions:
   contents: read
 
 jobs:
-  # Reports the check `build / build`, which is what branch protection on main requires.
-  # betty builds and tests in about a minute locally; the default 20-minute ceiling is for a cold runner.
-  # One JDK: no betty module declares a toolchain, so maven.compiler.release=11 covers the whole reactor.
   build:
-    uses: lolaf-org/workflows/.github/workflows/maven-build.yml@v1.0.0
+    uses: lolaf-org/workflows/.github/workflows/maven-build.yml@v1.0.1

@@ -7,8 +7,7 @@ permissions:
 
 jobs:
   auto-merge:
-    # The called workflow's token can hold no more than this grants.
     permissions:
       contents: write
       pull-requests: write
-    uses: lolaf-org/workflows/.github/workflows/dependabot-auto-merge.yml@v1.0.0
+    uses: lolaf-org/workflows/.github/workflows/dependabot-auto-merge.yml@v1.0.1
