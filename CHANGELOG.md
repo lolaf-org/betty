@@ -9,16 +9,6 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
-There is deliberately no `[Unreleased]` section, which is where Keep a Changelog would collect notes
-between releases. A section is written when the version it belongs to is being cut, so its heading
-carries the right number and date the first time and the workflow's check has exactly one heading it
-could mean.
-
-Betty starts at `0.9.0` rather than `1.0.0`: the `IOEventsListener` and `IOSession` surface still has
-planned changes, and `0.x` keeps them from each costing a major version. It is the number
-[ringos](https://github.com/lolaf-org/ringos) started at, for the same reason - the two are released against each
-other and it is easier to reason about them when their version numbers say the same thing.
-
 ## [0.9.1] - 2026-09-18
 
 ### Fixed
