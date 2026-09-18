@@ -930,8 +930,8 @@ class IOSessionImpl implements IOSession {
 
     private interface IOThreadSender {
 
-        boolean send(ByteBuffer message, IOWriter.MessageSentCallback messageSentCallback, Object messageSendingContext,
-                     CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer);
+        boolean send(ByteBuffer message, IOWriter.MessageSentCallback<?> messageSentCallback, Object messageSendingContext,
+                     CompletableFuture<?> writeFuture, boolean ioBufferPoolByteBuffer);
     }
 
     private interface WriteWatermarkStateTracker {
@@ -999,6 +999,16 @@ class IOSessionImpl implements IOSession {
             this.ioBufferPoolByteBuffer = ioBufferPoolByteBuffer;
             this.messageSendingContext = messageSendingContext;
             this.messageSentCallback = messageSentCallback;
+        }
+
+        void translate(ByteBuffer byteBuffer, MessageSentCallback<?> messageSentCallback, Object messageSendingContext, boolean ioBufferPoolByteBuffer, CompletableFuture writeFuture, long localSendTimeInNanos, int watermarkEnqueuedBytes) {
+            this.localSendTimeInNanos = localSendTimeInNanos;
+            this.byteBuffer = byteBuffer;
+            this.ioBufferPoolByteBuffer = ioBufferPoolByteBuffer;
+            this.writeFuture = writeFuture;
+            this.messageSendingContext = messageSendingContext;
+            this.messageSentCallback = messageSentCallback;
+            this.watermarkEnqueuedBytes = watermarkEnqueuedBytes;
         }
 
         void translate(ByteBufferBuilder byteBufferBuilder, MessageSentCallback<?> messageSentCallback, Object messageSendingContext, long localSendTimeInNanos) {
@@ -1329,6 +1339,7 @@ class IOSessionImpl implements IOSession {
                     try {
                         ioThreadSender.send(byteBufferBuilder.build(), messageSentCallback, messageSendingContext, null, byteBufferBuilder.isPooledByteBuffer());
                     } catch (IOException ex) {
+                        // for byteBufferBuilder.build()
                         safelyProcessCallbackOnIOException(ex, null, messageSentCallback, messageSendingContext, null);
                     }
                     return;
@@ -1427,27 +1438,24 @@ class IOSessionImpl implements IOSession {
                     + "what it holds did not free it, the peer is not reading");
         }
 
-        private boolean declineSendOnIOThread(ByteBuffer message, MessageSentCallback messageSentCallback, Object messageSendingContext,
-                                              CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer) {
+        private boolean declineSendOnIOThread(ByteBuffer message, MessageSentCallback<?> messageSentCallback, Object messageSendingContext,
+                                              CompletableFuture<?> writeFuture, boolean ioBufferPoolByteBuffer) {
             return false;
         }
 
-        private boolean sendOnIOThread(ByteBuffer message, MessageSentCallback messageSentCallback, Object messageSendingContext,
-                                       CompletableFuture writeFuture, boolean ioBufferPoolByteBuffer) {
+        private boolean sendOnIOThread(ByteBuffer message, MessageSentCallback<?> messageSentCallback, Object messageSendingContext,
+                                       CompletableFuture<?> writeFuture, boolean ioBufferPoolByteBuffer) {
             if (paused) {
                 // a paused session puts nothing on the socket, and the selector is not what stops this write: queueing
                 // it is, and it leaves on resume
                 return false;
             }
-            pendingWrite.byteBuffer = message;
-            pendingWrite.ioBufferPoolByteBuffer = ioBufferPoolByteBuffer;
-            pendingWrite.messageSentCallback = messageSentCallback;
-            pendingWrite.messageSendingContext = messageSendingContext;
-            pendingWrite.writeFuture = writeFuture;
-            pendingWrite.localSendTimeInNanos = activeIOStats.getTimeInNanos(IOStats.Operation.IO_MESSAGE_WRITE);
-            pendingWrite.watermarkEnqueuedBytes = message.position();
+            int bytesToEnqueue = message.position();
+            pendingWrite.translate(message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer, writeFuture,
+                    activeIOStats.getTimeInNanos(IOStats.Operation.IO_MESSAGE_WRITE), bytesToEnqueue);
+
             if (writeWatermarkState.isEnabled()) {
-                writeWatermarkState.onEnqueued(pendingWrite.watermarkEnqueuedBytes);
+                writeWatermarkState.onEnqueued(bytesToEnqueue);
             }
             try {
                 writeBufferOut(pendingWrite, false, activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE));
