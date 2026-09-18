@@ -18,15 +18,19 @@ package org.lolaf.betty.impl;
 import org.junit.jupiter.api.Test;
 import org.lolaf.betty.api.io.IOWriter;
 import org.lolaf.betty.api.io.ReleasableMessageSendingContext;
+import org.lolaf.betty.api.settings.IOSettings;
+import org.lolaf.ringos.Deadline;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 /**
@@ -117,6 +121,57 @@ class ReleasableMessageSendingContextTest extends AbstractTest {
             assertThat(callbacks).hasValue(1);
             assertThat(context.releases).hasValue(1);
         });
+    }
+
+    @Test
+    void releasesTheContextsOfWritesSentToAStoppedSession() {
+        setupTestEnvAndWaitForConnections();
+        clientIOsession.stop(Deadline.immediate());
+        Context futureContext = new Context();
+        Context callbackContext = new Context();
+        Context builderContext = new Context();
+        Context failingBuilderContext = new Context();
+        AtomicInteger callbacks = new AtomicInteger();
+        IOWriter.MessageSentCallback<Context> countingCallback = (message, sendingError, sendingContext) -> callbacks.incrementAndGet();
+
+        CompletableFuture<Context> future = clientIOsession.send(ByteBuffer.allocate(PAYLOAD.length()).put(PAYLOAD.getBytes()), futureContext, false);
+        clientIOsession.send(ByteBuffer.allocate(PAYLOAD.length()).put(PAYLOAD.getBytes()), callbackContext, countingCallback, false);
+        clientIOsession.send(payloadBuilder(), builderContext, countingCallback);
+        clientIOsession.send(failingBuilder(), failingBuilderContext, countingCallback);
+
+        assertThat(future).isCompletedExceptionally();
+        assertThat(callbacks).hasValue(3);
+        assertThat(futureContext.releases).hasValue(1);
+        assertThat(callbackContext.releases).hasValue(1);
+        assertThat(builderContext.releases).hasValue(1);
+        assertThat(failingBuilderContext.releases).hasValue(1);
+    }
+
+    /**
+     * A paused session neither writes on the IO thread nor drains its ring to make room, so sends from the IO thread fill it.
+     */
+    @Test
+    void releasesTheContextWhenTheWriteRingIsFull() {
+        setupTestEnvAndWaitForConnections();
+        IOSessionImpl session = (IOSessionImpl) clientIOsession;
+        session.pause(Deadline.immediate());
+        AtomicReference<CompletableFuture<Context>> rejected = new AtomicReference<>();
+        AtomicInteger releasesWhenRejected = new AtomicInteger(-1);
+
+        session.processTask(() -> {
+            for (int i = 0; i <= IOSettings.DEFAULT_TASKS_RING_BUFFER_SIZE && rejected.get() == null; i++) {
+                Context context = new Context();
+                CompletableFuture<Context> future = session.send(ByteBuffer.allocate(PAYLOAD.length()).put(PAYLOAD.getBytes()), context, false);
+                if (future.isCompletedExceptionally()) {
+                    releasesWhenRejected.set(context.releases.get());
+                    rejected.set(future);
+                }
+            }
+        });
+
+        await().untilAsserted(() -> assertThat(rejected.get()).isNotNull());
+        assertThatThrownBy(rejected.get()::join).hasCauseInstanceOf(IOException.class);
+        assertThat(releasesWhenRejected).hasValue(1);
     }
 
     /**

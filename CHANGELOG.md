@@ -19,6 +19,14 @@ planned changes, and `0.x` keeps them from each costing a major version. It is t
 [ringos](https://github.com/lolaf-org/ringos) started at, for the same reason - the two are released against each
 other and it is easier to reason about them when their version numbers say the same thing.
 
+## [0.9.1] - 2026-09-18
+
+### Fixed
+
+- **A `ReleasableMessageSendingContext` is released when a write is refused up front.** A send to a stopped session,
+  and a future-based send from the IO thread that found the write ring full, failed without releasing its context,
+  so a pooled context was never returned to its pool.
+
 ## [0.9.0] - 2026-09-12
 
 First public release. Betty is asynchronous NIO networking for Java that must not allocate or block on its hot path -
@@ -56,4 +64,5 @@ depends on [ringos](https://github.com/lolaf-org/ringos) and SLF4J and nothing e
   not time an operation returns a constant and no clock call is made for it, so measurement is genuinely free when it
   is off. A receive timestamp is handed to `onRead` under its own setting.
 
+[0.9.1]: https://github.com/lolaf-org/betty/releases/tag/v0.9.1
 [0.9.0]: https://github.com/lolaf-org/betty/releases/tag/v0.9.0

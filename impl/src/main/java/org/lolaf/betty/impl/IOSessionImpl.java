@@ -827,7 +827,7 @@ class IOSessionImpl implements IOSession {
         activeIOStats.onIOEventsListenerOnWriteCallback(this, messageSendingContext, methodCallStartTimeInNanos);
         activeIOStats.onMessageSent(this, bufferOut, messageSendingContext, localSendTimeInNanos);
         bufferOut.limit(limit).position(position);
-        releaseSendingContext(messageSendingContext);
+        releaseSendingContextIfNeeded(messageSendingContext);
     }
 
     private void reportWriteFailure(IOThreadRequest request, IOException ex) {
@@ -848,10 +848,10 @@ class IOSessionImpl implements IOSession {
         } catch (Exception processingException) {
             log.warn("Failed to process callback when processing IOException", processingException);
         }
-        releaseSendingContext(messageSendingContext);
+        releaseSendingContextIfNeeded(messageSendingContext);
     }
 
-    private void releaseSendingContext(Object messageSendingContext) {
+    private void releaseSendingContextIfNeeded(Object messageSendingContext) {
         if (messageSendingContext instanceof ReleasableMessageSendingContext) {
             try {
                 ((ReleasableMessageSendingContext) messageSendingContext).release();
@@ -1169,12 +1169,13 @@ class IOSessionImpl implements IOSession {
 
         @Override
         public <C> CompletableFuture<C> send(ByteBuffer message, C messageSendingContext, boolean ioBufferPoolByteBuffer) {
+            releaseSendingContextIfNeeded(messageSendingContext);
             return CompletableFuture.failedFuture(illegalStateCall());
         }
 
         @Override
         public <C> void send(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer) {
-            messageSentCallback.onMessageWriteCallback(message.flip(), illegalStateCall(), messageSendingContext);
+            failWrite(message.flip(), illegalStateCall(), messageSendingContext, messageSentCallback);
         }
 
         @Override
@@ -1182,9 +1183,9 @@ class IOSessionImpl implements IOSession {
             ByteBuffer message = null;
             try {
                 message = byteBufferBuilder.build();
-                messageSentCallback.onMessageWriteCallback(message.flip(), illegalStateCall(), messageSendingContext);
+                failWrite(message.flip(), illegalStateCall(), messageSendingContext, messageSentCallback);
             } catch (IOException ex) {
-                messageSentCallback.onMessageWriteCallback(null, ex, messageSendingContext);
+                failWrite(null, ex, messageSendingContext, messageSentCallback);
             } finally {
                 if (message != null && byteBufferBuilder.isPooledByteBuffer()) {
                     ioBufferPool.returnByteBuffer(message);
@@ -1194,6 +1195,14 @@ class IOSessionImpl implements IOSession {
 
         private IllegalStateException illegalStateCall() {
             return new IllegalStateException("IO session is inactive");
+        }
+
+        private <C> void failWrite(ByteBuffer message, Exception error, C messageSendingContext, MessageSentCallback<C> messageSentCallback) {
+            try {
+                messageSentCallback.onMessageWriteCallback(message, error, messageSendingContext);
+            } finally {
+                releaseSendingContextIfNeeded(messageSendingContext);
+            }
         }
     }
 
@@ -1256,6 +1265,7 @@ class IOSessionImpl implements IOSession {
                     return ioThreadFuture;
                 }
                 onWriteQueueingFailed(enqueuedBytes);
+                releaseSendingContextIfNeeded(messageSendingContext);
                 return CompletableFuture.failedFuture(writeRingFull());
             }
             CompletableFuture<C> future = new CompletableFuture<>();
