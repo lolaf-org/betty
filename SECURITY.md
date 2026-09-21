@@ -13,7 +13,7 @@ be.
 
 ## Supported versions
 
-Nothing is released yet. Once 0.1.0 is out, fixes go to the latest released version, and while the version is 0.x
+Fixes go to the latest released version, and while the version is 0.x
 that means the latest minor — there are no maintenance branches.
 
 ## Scope
