@@ -46,6 +46,74 @@ import static org.mockito.Mockito.*;
 @Slf4j
 class ClientImplTest extends AbstractTest {
 
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    /**
+     * A stop from another thread waits for the IO thread to disconnect. Interrupting that wait used to have the caller
+     * tear the session down a second time while the IO thread was still at it: two onDisconnected, then two
+     * reconnection attempts.
+     */
+    @Test
+    void testInterruptedStopDisconnectsOnceAndReconnectsOnce() throws Exception {
+        setupTestEnvAndWaitForConnections(getTestClientBuilder().toBuilder().connectionRetry(Duration.ofMillis(100)).build(),
+                getTestServerBuilder());
+        CountDownLatch insideOnDisconnected = new CountDownLatch(1);
+        CountDownLatch releaseOnDisconnected = new CountDownLatch(1);
+        AtomicInteger disconnections = new AtomicInteger();
+        doAnswer(invocation -> {
+            if (disconnections.incrementAndGet() == 1) {
+                insideOnDisconnected.countDown();
+                releaseOnDisconnected.await(10, TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(clientIoEventsListener).onDisconnected(any(IOSession.class));
+
+        Thread stopper = new Thread(() -> clientIOsession.stop(Deadline.of(Duration.ofSeconds(10))), "stopper");
+        stopper.start();
+        assertThat(insideOnDisconnected.await(10, TimeUnit.SECONDS)).isTrue();
+        stopper.interrupt();
+        stopper.join(TimeUnit.SECONDS.toMillis(10));
+        releaseOnDisconnected.countDown();
+
+        await().untilAsserted(() -> verify(serverIoEventsListener, times(2)).onConnected(any(IOSession.class)));
+        // several retry intervals: a second connect chain would have dialled again by then
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(500));
+        assertThat(disconnections).hasValue(1);
+        verify(serverIoEventsListener, times(2)).onConnected(any(IOSession.class));
+    }
+
+    /**
+     * When the wait for the IO thread times out, the caller disconnects the session itself, possibly while the IO
+     * thread is still disconnecting it: the listener is still told once.
+     */
+    @Test
+    void testStopTimingOutOnTheIOThreadDisconnectsOnce() {
+        setupTestEnvAndWaitForConnections();
+        CountDownLatch callerFellBack = new CountDownLatch(1);
+        AtomicInteger disconnections = new AtomicInteger();
+        doAnswer(invocation -> {
+            if (disconnections.incrementAndGet() == 1) {
+                // held past the stop deadline below, so that the caller gives up waiting and falls back
+                callerFellBack.await(10, TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(clientIoEventsListener).onDisconnected(any(IOSession.class));
+
+        clientIOsession.stop(Deadline.of(Duration.ofMillis(200)));
+        callerFellBack.countDown();
+
+        await().untilAsserted(() -> assertThat(disconnections).hasValue(1));
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(200));
+        assertThat(disconnections).hasValue(1);
+    }
+
     @ParameterizedTest
     @MethodSource("getTestParams")
     void testEmbeddedSchedulerService(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
@@ -227,7 +295,6 @@ class ClientImplTest extends AbstractTest {
         await().untilAtomic(receivedBytes, Matchers.equalTo(expectedReceivedBytesCount));
     }
 
-
     @ParameterizedTest
     @MethodSource("getTestParams")
     void testClientStoppingTriggersServerIOListenerEvents(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
@@ -408,15 +475,6 @@ class ClientImplTest extends AbstractTest {
         flushed = clientIOsession.waitForAllMessagesSent(Deadline.of(Duration.ofSeconds(10)));
         assertThat(flushed).isTrue();
         await().untilAtomic(receivedBytes, Matchers.equalTo(8 * "test".length()));
-    }
-
-    private static void awaitLatch(CountDownLatch latch) {
-        try {
-            assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(ex);
-        }
     }
 
     @Test

@@ -30,10 +30,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.Optional;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -111,7 +108,7 @@ class ClientImpl implements Client {
         ioWorkersGroup.start();
         connectAddressIterator = clientBuilder.getConnectAddresses().iterator();
         nextConnectAddress = null;
-        scheduleConnectTask();
+        requestConnect();
         log.info("IO client '{}' is started", clientBuilder.getId());
         return this;
     }
@@ -121,11 +118,12 @@ class ClientImpl implements Client {
         if (!started.getAndSet(false)) {
             return this;
         }
-        if (connectTask != null && !connectTask.isCancelled()) {
-            if (!connectTask.cancel(true)) {
-                log.info("Client '{}' failed to cancel connection task", clientBuilder.getId());
-            }
-            connectTask = null;
+        // a pending attempt already finds the client stopped; cancelling it just frees the scheduler, which may be
+        // shared with the application and so is never interrupted
+        try {
+            scheduledExecutorService.execute(this::cancelConnectTask);
+        } catch (RejectedExecutionException ex) {
+            log.debug("Client '{}' scheduler already stopped", clientBuilder.getId());
         }
         IOSession ioSession = connectedSession.getAndSet(null);
         if (ioSession != null) {
@@ -144,15 +142,37 @@ class ClientImpl implements Client {
         return started.get();
     }
 
-    private void scheduleConnectTask() {
-        if (started.get()) {
-            connectTask = scheduledExecutorService
-                    .schedule(this::connectTask, clientBuilder.getConnectionRetry().toMillis(), TimeUnit.MILLISECONDS);
+
+    private void requestConnect() {
+        if (!started.get()) {
+            return;
+        }
+        try {
+            scheduledExecutorService.execute(this::scheduleConnectTaskIfNone);
+        } catch (RejectedExecutionException ex) {
+            log.debug("Client '{}' is stopping, not reconnecting", clientBuilder.getId());
+        }
+    }
+
+    private void scheduleConnectTaskIfNone() {
+        if (!started.get() || connectedSession.get() != null || (connectTask != null && !connectTask.isDone())) {
+            return;
+        }
+        connectTask = scheduledExecutorService
+                .schedule(this::connectTask, clientBuilder.getConnectionRetry().toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private void cancelConnectTask() {
+        if (connectTask != null) {
+            connectTask.cancel(false);
+            connectTask = null;
         }
     }
 
     private void connectTask() {
-        if (!started.get()) {
+        // this run is the pending task: consumed, so that re-arming below is not taken for a second chain
+        connectTask = null;
+        if (!started.get() || connectedSession.get() != null) {
             return;
         }
         if (!connectAddressIterator.hasNext()) {
@@ -165,7 +185,7 @@ class ClientImpl implements Client {
             // held back rather than dropped: the address stays the candidate for the next attempt, so waiting does
             // not walk through the addresses, and the retry is re-armed so the listener is asked again
             log.debug("Client '{}' is not ready to connect to {}, retrying later", clientBuilder.getId(), nextConnectAddress);
-            scheduleConnectTask();
+            scheduleConnectTaskIfNone();
             return;
         }
         try {
@@ -194,9 +214,10 @@ class ClientImpl implements Client {
             public void onConnected(IOSession session) {
                 log.info("Connected '{}' to {}", clientBuilder.getId(), session.getSocketAddress());
                 connectedSession.set(session);
-                if (connectTask != null) {
-                    connectTask.cancel(true);
-                    connectTask = null;
+                try {
+                    scheduledExecutorService.execute(ClientImpl.this::cancelConnectTask);
+                } catch (RejectedExecutionException ex) {
+                    log.debug("Client '{}' is stopping", clientBuilder.getId());
                 }
                 super.onConnected(session);
             }
@@ -209,7 +230,7 @@ class ClientImpl implements Client {
                     super.onDisconnected(session);
                 }
                 connectedSession.set(null);
-                scheduleConnectTask();
+                requestConnect();
             }
         };
     }

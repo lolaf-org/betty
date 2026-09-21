@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   release:
-    uses: lolaf-org/workflows/.github/workflows/maven-release.yml@v1.0.1
+    uses: lolaf-org/workflows/.github/workflows/maven-release.yml@v1.0.2
     with:
       release-version: ${{ inputs.releaseVersion }}
       development-version: ${{ inputs.developmentVersion }}

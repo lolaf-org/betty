@@ -14,4 +14,4 @@ permissions:
 
 jobs:
   build:
-    uses: lolaf-org/workflows/.github/workflows/maven-build.yml@v1.0.1
+    uses: lolaf-org/workflows/.github/workflows/maven-build.yml@v1.0.2

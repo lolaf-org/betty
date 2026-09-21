@@ -78,6 +78,7 @@ class IOSessionImpl implements IOSession {
     private final boolean orderedWrites;
     @Getter(AccessLevel.PACKAGE)
     private final AtomicBoolean started;
+    private final AtomicBoolean disconnected;
     private final IntFunction<ByteBuffer> readBufferAllocator;
     @Getter(AccessLevel.PACKAGE)
     private final boolean trackReceiveTime;
@@ -136,6 +137,7 @@ class IOSessionImpl implements IOSession {
         this.readBufferAllocator = ioSettings.isReadDirectBuffer() ? ByteBuffer::allocateDirect : ByteBuffer::allocate;
         this.readBuffer = readBufferAllocator.apply(ioSettings.getReadBufferSize());
         this.started = new AtomicBoolean(false);
+        this.disconnected = new AtomicBoolean(false);
         this.localIOThreadRequest = new IOThreadRequest(0);
         this.localIOThreadWorkRequestConsumer = localIOThreadRequest::transferFromPoll;
         ioSettings.getSocketOptions().forEach((so, val) -> {
@@ -436,16 +438,12 @@ class IOSessionImpl implements IOSession {
         return selectionKey != null && selectionKey.isValid();
     }
 
-    /**
-     * Runs {@link #disconnect()} on the thread that owns this session.
-     */
     private void disconnectOnIOThread(Deadline deadline) {
-        if (isWithinIOThread() || !hasActiveSelectionKey()
-                || ioWorkerThread == null || !ioWorkerThread.isAlive()) {
+        if (isWithinIOThread() || !hasActiveSelectionKey() || ioWorkerThread == null || !ioWorkerThread.isAlive()) {
             disconnect();
             return;
         }
-        CountDownLatch disconnected = new CountDownLatch(1);
+        CountDownLatch disconnectedLatch = new CountDownLatch(1);
         AtomicBoolean ranOnIOThread = new AtomicBoolean();
         // the latch also counts down when the task is rejected, so it says the handover is over and not that it ran
         boolean answered = false;
@@ -455,15 +453,18 @@ class IOSessionImpl implements IOSession {
                     disconnect();
                     ranOnIOThread.set(true);
                 } finally {
-                    disconnected.countDown();
+                    disconnectedLatch.countDown();
                 }
-            }, (task, error) -> disconnected.countDown());
+            }, (task, error) -> disconnectedLatch.countDown());
             // an immediate deadline still gets a moment here: this is the difference between a clean disconnection
             // and one leaving buffers behind, not a flush the caller asked to skip
-            answered = disconnected.await(Math.max(DISCONNECT_ON_IO_THREAD_MIN_WAIT_IN_MILLIS, deadline.getRemainingTime().toMillis()),
+            answered = disconnectedLatch.await(Math.max(DISCONNECT_ON_IO_THREAD_MIN_WAIT_IN_MILLIS, deadline.getRemainingTime().toMillis()),
                     TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
+            // the task is queued and the IO thread runs it whatever happens to this wait: disconnecting from here
+            // as well would only race it
             Thread.currentThread().interrupt();
+            return;
         } catch (RuntimeException e) {
             log.info("Failed to hand the disconnection of IOSession {} to its IO thread", id, e);
         }
@@ -886,6 +887,11 @@ class IOSessionImpl implements IOSession {
     }
 
     void disconnect(boolean releasePooledBuffers) {
+        // the caller of stop() falls back to this once its wait for the IO thread times out, and a slow rather than
+        // stuck IO thread still runs its queued disconnection afterwards: the listener must be told once
+        if (!disconnected.compareAndSet(false, true)) {
+            return;
+        }
         if (hasActiveSelectionKey()) {
             selectionKey.cancel();
         }

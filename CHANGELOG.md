@@ -9,10 +9,14 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
-## [0.9.1] - 2026-09-18
+## [0.9.1] - 2026-09-21
 
 ### Fixed
 
+- **A session is disconnected once.** Interrupting a `stop()` could fire `onDisconnected` twice and make a client dial
+  twice.
+- **Cancelling a pending reconnection no longer interrupts the client's scheduler thread**, which could break a task
+  the application was running on the same scheduler.
 - **A `ReleasableMessageSendingContext` is released when a write is refused up front.** A send to a stopped session,
   and a future-based send from the IO thread that found the write ring full, failed without releasing its context,
   so a pooled context was never returned to its pool.
