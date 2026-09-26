@@ -23,6 +23,9 @@ matching `[x.y.z]:` link definition at the foot of the file.
 - **`stop()` on a session is more reliable.** It no longer closes the connection in an unsafe way after a short timeout;
   it waits, up to 30 seconds, until the session is fully closed. Stopping an `IOWorker` now also closes the sessions still
   running on it, and a session rejected by the `RemoteSessionsFilter` no longer receives `onShutdown`.
+- **Stopping a session from its own `onRead` now waits for `onRead` to finish.** The connection used to close right
+  away, so `onDisconnected` was called while `onRead` was still running, and the end of `onRead` worked on a closed
+  session. The connection now closes as soon as `onRead` returns.
 - **A `send` from another thread no longer blocks forever on a disconnected session.** When the send queue was
   full as the session closed, the call waited forever; it now fails like a send to a stopped session.
 

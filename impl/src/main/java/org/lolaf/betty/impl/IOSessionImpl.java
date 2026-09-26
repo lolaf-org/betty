@@ -121,6 +121,7 @@ class IOSessionImpl implements IOSession {
     private Runnable wakeupSelectorIfNeeded;
     private boolean ioWorkerStatsEnabled;
     private volatile boolean processingReadOperation;
+    private boolean disconnectionAfterRead;
     private boolean paused;
     @Getter(AccessLevel.PACKAGE)
     private IOWorker ownerWorker;
@@ -451,6 +452,12 @@ class IOSessionImpl implements IOSession {
     }
 
     private void disconnectOnIOThread() {
+        // the listener is still handling what it read: closing now would call onDisconnected from inside its onRead
+        // and release buffers it may still be using
+        if (processingReadOperation && isWithinIOThread()) {
+            disconnectionAfterRead = true;
+            return;
+        }
         CountDownLatch disconnection = new CountDownLatch(1);
         processTask(() -> {
             try {
@@ -658,9 +665,12 @@ class IOSessionImpl implements IOSession {
         processingReadOperation = true;
         try {
             onOperationReadInternal(localReceiveTimeInNanos);
-
         } finally {
             processingReadOperation = false;
+            if (disconnectionAfterRead) {
+                disconnectionAfterRead = false;
+                disconnect();
+            }
         }
     }
 

@@ -396,6 +396,43 @@ class IOWorkerTest {
     }
 
     /**
+     * A protocol handler usually carries on after asking to close, recording the message that asked for it: the
+     * connection, and what {@code onDisconnected} tears down, must still be there until {@code onRead} returns.
+     */
+    @Test
+    void aSessionStoppedFromItsOwnReadCallbackClosesOnceTheCallbackReturns() throws Exception {
+        AtomicBoolean insideOnRead = new AtomicBoolean();
+        AtomicBoolean connectedAfterStop = new AtomicBoolean();
+        AtomicBoolean disconnectedInsideOnRead = new AtomicBoolean();
+        CountDownLatch disconnected = new CountDownLatch(1);
+
+        startWorker("stop-inside-read-worker");
+        IOSession session = registerSession(new IOEventsListener() {
+            @Override
+            public void onRead(IOSession ioSession, ByteBuffer message, long localReceiveTimeInNanos) {
+                insideOnRead.set(true);
+                message.position(message.limit());
+                ioSession.stop(Deadline.immediate());
+                connectedAfterStop.set(ioSession.isConnected());
+                insideOnRead.set(false);
+            }
+
+            @Override
+            public void onDisconnected(IOSession ioSession) {
+                disconnectedInsideOnRead.set(insideOnRead.get());
+                disconnected.countDown();
+            }
+        });
+        writeToPeer("close once done");
+
+        assertThat(disconnected.await(10, TimeUnit.SECONDS)).as("the session is disconnected").isTrue();
+        assertThat(connectedAfterStop).as("still connected for the rest of onRead").isTrue();
+        assertThat(disconnectedInsideOnRead).as("onDisconnected is not called from inside onRead").isFalse();
+        assertThat(session.isConnected()).isFalse();
+        assertThat(peer.read(ByteBuffer.allocate(1))).as("the peer sees the socket closed").isEqualTo(-1);
+    }
+
+    /**
      * The same contract with nothing exotic holding the thread: a session being read continuously while stop is
      * called, which is the shape of a connector shut down under load.
      */
