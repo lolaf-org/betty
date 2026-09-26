@@ -69,12 +69,15 @@ public interface IOWorker extends Startable<IOWorker> {
     String getGroup();
 
     /**
-     * Adopts an already connected or accepted socket, creating the session for it.
+     * Adopts an already connected or accepted socket, creating the session for it on this worker's IO thread.
+     * <p>
+     * Called from any other thread, this hands the registration over and returns before the session exists, so a
+     * failure is reported to the listener rather than thrown.
      *
-     * @param clientSession true for a socket this side dialled, false for one it accepted; it decides the TLS role
+     * @param clientSession true for a socket this side dialed, false for one it accepted; it decides the TLS role
      * @param socket        the connected socket
      * @param baseBuilder   the client or server settings the session is built from
-     * @throws IOException if the socket cannot be registered
+     * @throws IOException if this worker is not running, or if the registration fails when called from the IO thread
      */
     void register(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) throws IOException;
 

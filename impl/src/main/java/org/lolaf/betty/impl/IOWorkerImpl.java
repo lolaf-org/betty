@@ -52,6 +52,8 @@ import java.util.function.Consumer;
 class IOWorkerImpl implements IOWorker {
 
     private static final long ZERO = 0L;
+    // a power of two, as the ring buffer requires; offering to a full queue blocks, so it bounds a burst of commands
+    private static final int PENDING_COMMANDS_CAPACITY = Integer.getInteger("IOWorker.pending.commands.capacity", 16);
     private static final ThreadLocal<Boolean> IO_WORKER_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private final AtomicBoolean running;
     @Getter
@@ -67,7 +69,7 @@ class IOWorkerImpl implements IOWorker {
     private final Map<IOSession, RingBufferStates> ioSessionRingBufferStates;
     private final Thread ioWorkerThread;
     private final ExponentialMovingAverage loadEma;
-    private final RingBuffer<IOWorkerMigrationCommand> pendingMigrations;
+    private final RingBuffer<IOWorkerCommand> pendingCommands;
     @Getter
     private Selector selector;
     private Selector optimizedSelector;
@@ -78,7 +80,7 @@ class IOWorkerImpl implements IOWorker {
     private int selectedKeysCounter;
     private int pendingHandshakesCount;
     private boolean enabledStatistics;
-    private volatile boolean hasPendingMigrations;
+    private volatile boolean hasPendingCommands;
     private Runnable selectorWakeupIfNeeded;
 
     IOWorkerImpl(String name, IOWorkersGroupSettings ioWorkersGroupSettings, IOWorkersGroupSettings.IOThreadGroup threadGroup) {
@@ -96,7 +98,7 @@ class IOWorkerImpl implements IOWorker {
                 ? ExponentialMovingAverage.fromTimeWindow(ioWorkersGroupSettings.getWorkersLoadEMATimeWindow(), ioWorkerStatistics.getStatsResolution()) : null;
         this.statsTask = this::runStats;
         this.ioSessionRingBufferStates = new ConcurrentHashMap<>();
-        this.pendingMigrations = RingBufferFactory.build(RingBufferFactory.AccessType.SINGLE_CONSUMER_MULTI_PRODUCER, 8, IOWorkerMigrationCommand::new);
+        this.pendingCommands = RingBufferFactory.build(RingBufferFactory.AccessType.SINGLE_CONSUMER_MULTI_PRODUCER, PENDING_COMMANDS_CAPACITY, IOWorkerCommand::new);
         ioWorkerThread = threadGroup.getThreadFactory().newThread(this::runLoop);
         ioWorkerThread.setName(this.name);
         ioWorkerThread.setDaemon(true);
@@ -253,33 +255,75 @@ class IOWorkerImpl implements IOWorker {
             return CompletableFuture.failedFuture(new IllegalStateException("Session " + session + " is not registered"));
         }
         CompletableFuture<Void> future = new CompletableFuture<>();
-        submitIOWorkerMigration(true, (IOSessionImpl) session, (IOWorkerImpl) target, future);
+        submitMigration(CommandType.DETACH, (IOSessionImpl) session, (IOWorkerImpl) target, future);
         return future;
     }
 
-    private void submitIOWorkerMigration(boolean detachSession, IOSessionImpl session, IOWorkerImpl target, CompletableFuture<Void> future) {
-        pendingMigrations.offerBlocking(IOWorkerMigrationCommand::translate, detachSession, target, session, future, new BackoffIdleStrategy());
-        hasPendingMigrations = true;
+    private void submitMigration(CommandType type, IOSessionImpl session, IOWorkerImpl target, CompletableFuture<Void> future) {
+        pendingCommands.offerBlocking(IOWorkerCommand::translateMigration, type, target, session, future, new BackoffIdleStrategy());
+        signalPendingCommands();
+    }
+
+    private void submitRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
+        pendingCommands.offerBlocking(IOWorkerCommand::translateRegistration, clientSession, socket, baseBuilder, new BackoffIdleStrategy());
+        signalPendingCommands();
+    }
+
+    private void signalPendingCommands() {
+        hasPendingCommands = true;
         if (selectorWakeupIfNeeded != null) {
             selectorWakeupIfNeeded.run();
         }
     }
 
-    private void onIOWorkerMigrationCommand(IOWorkerMigrationCommand cmd) {
+    private void onIOWorkerCommand(IOWorkerCommand cmd) {
         try {
-            if (cmd.detachSession) {
-                handleDetach(cmd);
-            } else {
-                handleAttach(cmd);
+            switch (cmd.type) {
+                case REGISTER:
+                    registerInternal(cmd.clientSession, cmd.socket, cmd.baseBuilder);
+                    break;
+                case DETACH:
+                    handleDetach(cmd);
+                    break;
+                case ATTACH:
+                    handleAttach(cmd);
+                    break;
+                default:
+                    throw new IllegalStateException("Unhandled command " + cmd.type);
             }
         } catch (Exception t) {
-            cmd.resultFuture.completeExceptionally(t);
+            if (cmd.resultFuture != null) {
+                cmd.resultFuture.completeExceptionally(t);
+            } else {
+                log.error("Failed to register socket {} on {}", cmd.socket, name, t);
+                closeQuietly(cmd.socket);
+            }
         } finally {
             cmd.clean();
         }
     }
 
-    private void handleDetach(IOWorkerMigrationCommand command) throws IOException {
+    private void onIOWorkerCommandAfterStop(IOWorkerCommand cmd) {
+        try {
+            if (cmd.type == CommandType.REGISTER) {
+                closeQuietly(cmd.socket);
+            } else {
+                cmd.resultFuture.completeExceptionally(new IllegalStateException("IO worker " + name + " is stopped"));
+            }
+        } finally {
+            cmd.clean();
+        }
+    }
+
+    private void closeQuietly(SocketChannel socket) {
+        try {
+            socket.close();
+        } catch (IOException e) {
+            log.info("Failed to close socket {} on IO worker {}", socket, name, e);
+        }
+    }
+
+    private void handleDetach(IOWorkerCommand command) throws IOException {
         IOSessionImpl session = command.session;
         session.detachFromIOWorker();
         // Flush cancelled key from this selector before the channel is re-registered elsewhere.
@@ -287,10 +331,10 @@ class IOWorkerImpl implements IOWorker {
         registeredSessions.remove(session);
         ioSessionRingBufferStates.remove(session);
         computeTrackReceiveTime();
-        command.target.submitIOWorkerMigration(false, session, null, command.resultFuture);
+        command.target.submitMigration(CommandType.ATTACH, session, null, command.resultFuture);
     }
 
-    private void handleAttach(IOWorkerMigrationCommand command) throws IOException {
+    private void handleAttach(IOWorkerCommand command) throws IOException {
         IOSessionImpl session = command.session;
         session.attachToIOWorker(selector, selectStrategy, this::onSessionStopped, this::onIOSessionTasksBufferFull,
                 this::onIOSessionWritesBufferFull, this.ioWorkerThread, this);
@@ -311,6 +355,9 @@ class IOWorkerImpl implements IOWorker {
             selectUntilStopped();
         } finally {
             // also on an Error: a session's disconnection only ever runs on its IO thread, so this is its last chance
+            while (pendingCommands.poll(this::onIOWorkerCommandAfterStop)) {
+                // drain
+            }
             stopRegisteredSessions();
         }
     }
@@ -340,9 +387,9 @@ class IOWorkerImpl implements IOWorker {
             } catch (IOException ex) {
                 log.error("CRITICAL: IOException occurred in IO thread {}", ioWorkerThread.getName(), ex);
             }
-            if (hasPendingMigrations) {
-                hasPendingMigrations = false;
-                while (pendingMigrations.poll(this::onIOWorkerMigrationCommand)) {
+            if (hasPendingCommands) {
+                hasPendingCommands = false;
+                while (pendingCommands.poll(this::onIOWorkerCommand)) {
                     // drain
                 }
             }
@@ -488,7 +535,14 @@ class IOWorkerImpl implements IOWorker {
 
     @Override
     public void register(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) throws IOException {
-        registerInternal(clientSession, socket, baseBuilder);
+        if (Thread.currentThread() == ioWorkerThread) {
+            registerInternal(clientSession, socket, baseBuilder);
+            return;
+        }
+        if (!running.get()) {
+            throw new IOException("IO worker " + name + " is not running");
+        }
+        submitRegistration(clientSession, socket, baseBuilder);
     }
 
     /**
@@ -599,23 +653,40 @@ class IOWorkerImpl implements IOWorker {
         AtomicBoolean tasksBufferFull = new AtomicBoolean();
     }
 
-    private static final class IOWorkerMigrationCommand {
-        private boolean detachSession;
+    private enum CommandType {
+        REGISTER, DETACH, ATTACH
+    }
+
+    private static final class IOWorkerCommand {
+        private CommandType type;
         private IOWorkerImpl target;
         private IOSessionImpl session;
         private CompletableFuture<Void> resultFuture;
+        private boolean clientSession;
+        private SocketChannel socket;
+        private BaseBuilder baseBuilder;
 
-        void translate(boolean detachSession, IOWorkerImpl target, IOSessionImpl session, CompletableFuture<Void> resultFuture) {
-            this.detachSession = detachSession;
+        void translateMigration(CommandType type, IOWorkerImpl target, IOSessionImpl session, CompletableFuture<Void> resultFuture) {
+            this.type = type;
             this.target = target;
             this.session = session;
             this.resultFuture = resultFuture;
         }
 
+        void translateRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
+            this.type = CommandType.REGISTER;
+            this.clientSession = clientSession;
+            this.socket = socket;
+            this.baseBuilder = baseBuilder;
+        }
+
         void clean() {
+            type = null;
             session = null;
             target = null;
             resultFuture = null;
+            socket = null;
+            baseBuilder = null;
         }
     }
 }

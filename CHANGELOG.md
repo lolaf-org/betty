@@ -28,6 +28,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
   session. The connection now closes as soon as `onRead` returns.
 - **A `send` from another thread no longer blocks forever on a disconnected session.** When the send queue was
   full as the session closed, the call waited forever; it now fails like a send to a stopped session.
+- **`onConnected` always runs on the session's IO thread.** A socket passed to `IOWorker.register` from another thread
+  used to get its `onConnected` on that thread.
 
 ## [0.9.1] - 2026-09-21
 

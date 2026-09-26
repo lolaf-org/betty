@@ -352,6 +352,29 @@ class IOWorkerTest {
         }
     }
 
+    @Test
+    void aSessionRegisteredFromAnotherThreadIsConnectedOnItsIOThread() throws Exception {
+        startWorker("registering-worker");
+        AtomicReference<Thread> connectedOn = new AtomicReference<>();
+        AtomicReference<Thread> readOn = new AtomicReference<>();
+        registerSession(new CountingListener() {
+            @Override
+            public void onConnected(IOSession session) {
+                connectedOn.set(Thread.currentThread());
+            }
+
+            @Override
+            public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
+                super.onRead(session, message, localReceiveTimeInNanos);
+                readOn.set(Thread.currentThread());
+            }
+        });
+        writeToPeer("find the IO thread");
+        await().atMost(Duration.ofSeconds(10)).until(() -> readOn.get() != null);
+
+        assertThat(connectedOn.get()).isSameAs(readOn.get());
+    }
+
     /**
      * The defect this class was written for: an IO thread held inside {@code onRead} past the stop deadline used to be
      * left running - {@code stop} logged a warning, closed the selector under it and returned as though it had
