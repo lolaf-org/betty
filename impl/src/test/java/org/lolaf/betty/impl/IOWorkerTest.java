@@ -179,6 +179,71 @@ class IOWorkerTest {
     }
 
     @Test
+    void aTaskProducerBlockedOnAFullQueueIsReleasedByTheDisconnection() throws Exception {
+        AtomicInteger refused = new AtomicInteger();
+        assertEveryProducedRequestIsAnsweredOnDisconnection((session, requests) -> {
+            for (int i = 0; i < requests; i++) {
+                session.processTask(() -> {
+                }, (task, error) -> {
+                    if (error != null) {
+                        refused.incrementAndGet();
+                    }
+                });
+            }
+        }, refused);
+    }
+
+    @Test
+    void aWriteProducerBlockedOnAFullQueueIsReleasedByTheDisconnection() throws Exception {
+        AtomicInteger refused = new AtomicInteger();
+        assertEveryProducedRequestIsAnsweredOnDisconnection((session, requests) -> {
+            for (int i = 0; i < requests; i++) {
+                session.send(ByteBuffer.allocate(8).putLong(i), null, (message, error, context) -> {
+                    if (error != null) {
+                        refused.incrementAndGet();
+                    }
+                }, false);
+            }
+        }, refused);
+    }
+
+    /**
+     * Holds the IO thread in {@code onRead} so that a producer thread fills the session queue and blocks on it, then
+     * stops the session from that IO thread: every request, queued or refused, must get its failure exactly once.
+     */
+    private void assertEveryProducedRequestIsAnsweredOnDisconnection(java.util.function.BiConsumer<IOSession, Integer> produce,
+                                                                     AtomicInteger refused) throws Exception {
+        int requests = 100_000;
+        startWorker("full-queue-worker");
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        IOSession session = registerSession(new IOEventsListener() {
+            @Override
+            public void onRead(IOSession ioSession, ByteBuffer message, long localReceiveTimeInNanos) {
+                message.position(message.limit());
+                holding.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                ioSession.stop(Deadline.immediate());
+            }
+        });
+        writeToPeer("hold the IO thread");
+        assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
+
+        Thread producer = new Thread(() -> produce.accept(session, requests), "full-queue-producer");
+        producer.start();
+        await().atMost(Duration.ofSeconds(10)).until(() -> producer.getState() == Thread.State.TIMED_WAITING);
+        release.countDown();
+
+        producer.join(10_000);
+        assertThat(producer.isAlive()).as("the producer is released").isFalse();
+        assertThat(refused).hasValue(requests);
+    }
+
+    @Test
     void stopFromAnotherIOThreadDoesNotWaitForTheSessionIOThread() throws Exception {
         startWorker("held-worker");
         CountDownLatch holding = new CountDownLatch(1);

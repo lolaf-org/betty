@@ -17,12 +17,14 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ### Fixed
 
-- **`processTask` rejects a task once the session has no IO thread left.** A task submitted from another thread to a
-  disconnected session, or one whose IO worker is gone, is handed to its callback with an `EOFException` instead of
-  being queued where nothing would ever run it. Once the queue was full, such a call used to block forever.
+- **`processTask` no longer blocks forever once the session has no IO thread left.** A task submitted from another
+  thread to a disconnected session, or one whose IO worker is gone, is handed to its callback with an `EOFException`.
+  Once the queue was full, such a call used to block forever.
 - **`stop()` on a session is more reliable.** It no longer closes the connection in an unsafe way after a short timeout;
   it waits, up to 30 seconds, until the session is fully closed. Stopping an `IOWorker` now also closes the sessions still
   running on it, and a session rejected by the `RemoteSessionsFilter` no longer receives `onShutdown`.
+- **A `send` from another thread no longer blocks forever on a disconnected session.** When the send queue was
+  full as the session closed, the call waited forever; it now fails like a send to a stopped session.
 
 ## [0.9.1] - 2026-09-21
 

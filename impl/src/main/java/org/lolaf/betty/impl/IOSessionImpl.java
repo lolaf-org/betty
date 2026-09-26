@@ -96,6 +96,8 @@ class IOSessionImpl implements IOSession {
     private final Consumer<IOThreadRequest> localIOThreadWorkRequestConsumer;
     private final IOStats ioStats;
     private final CpuTimeStats cpuTimeStats;
+    private final RingBuffer.EventTranslatorTwoArg<IOThreadRequest, Runnable, BiConsumer<Runnable, Exception>> translateTask;
+    private final IOWriter inactiveIOWriter;
     private volatile ConnectionState connectionState;
     private boolean insideWriteCycle;
     private Consumer<IOSession> sessionStoppedConsumer;
@@ -122,7 +124,6 @@ class IOSessionImpl implements IOSession {
     private boolean paused;
     @Getter(AccessLevel.PACKAGE)
     private IOWorker ownerWorker;
-    private boolean assignedToIOWorker;
 
     public IOSessionImpl(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder, IOSettings ioSettings, RemoteSessionsFilter remoteSessionsFilter,
                          IOBufferPool sharedIOBufferPool, IOWorkersGroupSettings ioWorkersGroupSettings) {
@@ -136,6 +137,8 @@ class IOSessionImpl implements IOSession {
                 .multiThreadingAccessMode(poolMultiThreadingMode).build()).build();
         this.pendingWrite = new IOThreadRequest(0);
         this.orderedWrites = ioSettings.isOrderedWrites();
+        this.translateTask = this::translateTask;
+        this.inactiveIOWriter = new InactiveIOWriter();
         // ordered writes make the IO thread queue its own messages, and so a producer of the ring on top of whichever
         // application threads write to the session
         this.ioThreadRequests = ioSettings.isMultiThreadedWriteAPICalls() || orderedWrites
@@ -171,7 +174,6 @@ class IOSessionImpl implements IOSession {
         }
         this.ioStats = localIOStats;
         this.activeIOStats = ioStats.enabledByDefault() ? ioStats : ensureCorrectVoidIOStatsInCaseOfLoadCalculation(ioWorkersGroupSettings, IOStats.VoidStats.getInstance());
-
         this.maxBytesCountPerWriteCycle = ioSettings.getMaxBytesCountPerWriteCycle();
         this.trackReceiveTime = ioSettings.isTrackReceiveTime();
         this.tags = new HashSet<>();
@@ -205,6 +207,7 @@ class IOSessionImpl implements IOSession {
             bufferOut.position(bufferOut.limit());
         }
     }
+
 
     private BackoffIdleStrategy getIdleStrategy(Consumer<IOSession> ringBufferFullConsumer) {
         return new BackoffIdleStrategy() {
@@ -339,7 +342,6 @@ class IOSessionImpl implements IOSession {
     }
 
     void detachFromIOWorker() {
-        assignedToIOWorker = false;
         if (hasActiveSelectionKey()) {
             selectionKey.cancel();
         }
@@ -355,7 +357,6 @@ class IOSessionImpl implements IOSession {
         this.ioWorkerThread = ioWorkerThread;
         this.wakeupSelectorIfNeeded = selectStrategy.requireSelectorWakeup() ? selector::wakeup : this::nothingToDo;
         this.selectionKey = socket.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, this);
-        this.assignedToIOWorker = true;
     }
 
     @Override
@@ -429,7 +430,7 @@ class IOSessionImpl implements IOSession {
                 selectionKey.interestOpsAnd(~SelectionKey.OP_READ);
             }
             ioEventsListener.onShutdown(this);
-            ioWriter = new InactiveIOWriter();
+            ioWriter = inactiveIOWriter;
             if (!flushOutgoingMessagesDeadline.isImmediate() && !isWithinIOThread()) {
                 waitForAllMessagesRead(flushOutgoingMessagesDeadline.fromRemainingTime(0.5));
                 waitForAllMessagesSent(flushOutgoingMessagesDeadline);
@@ -579,7 +580,7 @@ class IOSessionImpl implements IOSession {
             executeTask(task, callback);
             return;
         }
-        if (!offerUntilQueuedOrNoIOThreadLeft(task, callback)) {
+        if (offerRefused(translateTask, task, callback, ioThreadTaskRequestsIdleStrategy)) {
             callback.accept(task, new EOFException("Cannot process IOTask on disconnected session " + id));
             return;
         }
@@ -587,30 +588,62 @@ class IOSessionImpl implements IOSession {
             selectionKey.interestOpsOr(SelectionKey.OP_WRITE);
             wakeupSelectorIfNeeded.run();
         } catch (CancelledKeyException ex) {
-            if (!assignedToIOWorker) {
-                // we may have detached the session to migrate to a new io thread
-                return;
+            // not disconnected, so detached for a migration: the new worker runs the task
+            if (connectionState == ConnectionState.DISCONNECTED) {
+                callback.accept(task, new EOFException("Cannot process IOTask on disconnected session " + id));
             }
-            callback.accept(task, new EOFException("Cannot process IOTask on disconnected session " + id));
         }
     }
 
-    // with no IO thread left nothing drains the queue, so a blocking offer on a full one would never return
-    private boolean offerUntilQueuedOrNoIOThreadLeft(Runnable task, BiConsumer<Runnable, Exception> callback) {
-        if (hasNoIOThreadLeft()) {
+    /**
+     * Offers from a thread other than the IO thread and, only once the ring is full, waits for a free slot while an IO
+     * thread is left to free one: answers true when there is none. Checked right before each retry, since the
+     * disconnection frees the whole ring. The fast path is a bare offer, so a request offered right after a disconnection
+     * drained the ring is never answered: a rare race, judged not worth a cost on every send.
+     */
+    private <A, B> boolean offerRefused(RingBuffer.EventTranslatorTwoArg<IOThreadRequest, A, B> translator,
+                                        A first, B second, IdleStrategy idleStrategy) {
+        if (ioThreadRequests.offer(translator, first, second)) {
             return false;
         }
-        if (ioThreadRequests.offer(this::translateTask, task, callback)) {
-            return true;
-        }
-        ioThreadTaskRequestsIdleStrategy.reset();
+        idleStrategy.reset();
         do {
-            ioThreadTaskRequestsIdleStrategy.idle();
+            idleStrategy.idle();
             if (hasNoIOThreadLeft()) {
-                return false;
+                return true;
             }
-        } while (!ioThreadRequests.offer(this::translateTask, task, callback));
-        return true;
+        } while (!ioThreadRequests.offer(translator, first, second));
+        return false;
+    }
+
+    private <A, B, C> boolean offerRefused(RingBuffer.EventTranslatorThreeArg<IOThreadRequest, A, B, C> translator,
+                                           A first, B second, C third, IdleStrategy idleStrategy) {
+        if (ioThreadRequests.offer(translator, first, second, third)) {
+            return false;
+        }
+        idleStrategy.reset();
+        do {
+            idleStrategy.idle();
+            if (hasNoIOThreadLeft()) {
+                return true;
+            }
+        } while (!ioThreadRequests.offer(translator, first, second, third));
+        return false;
+    }
+
+    private <A, B, C, D> boolean offerRefused(RingBuffer.EventTranslatorFourArg<IOThreadRequest, A, B, C, D> translator,
+                                              A first, B second, C third, D fourth, IdleStrategy idleStrategy) {
+        if (ioThreadRequests.offer(translator, first, second, third, fourth)) {
+            return false;
+        }
+        idleStrategy.reset();
+        do {
+            idleStrategy.idle();
+            if (hasNoIOThreadLeft()) {
+                return true;
+            }
+        } while (!ioThreadRequests.offer(translator, first, second, third, fourth));
+        return false;
     }
 
     private boolean hasNoIOThreadLeft() {
@@ -724,7 +757,7 @@ class IOSessionImpl implements IOSession {
         }
         clearWriteInterestUnlessRequeued();
     }
-    
+
     private boolean canContinueProcessingIOThreadRequests(int maxWritableBytesCount) {
         return pendingWrite.isFullyWritten() && maxWritableBytesCount >= 0;
     }
@@ -1333,8 +1366,11 @@ class IOSessionImpl implements IOSession {
                 return CompletableFuture.failedFuture(writeRingFull());
             }
             CompletableFuture<C> future = new CompletableFuture<>();
-            onWriteQueueing(message);
-            ioThreadRequests.offerBlocking(translateSendWithFuture, message, future, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
+            int enqueuedBytes = onWriteQueueing(message);
+            if (offerRefused(translateSendWithFuture, message, future, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy)) {
+                onWriteQueueingFailed(enqueuedBytes);
+                return inactiveIOWriter.send(message, messageSendingContext, ioBufferPoolByteBuffer);
+            }
             registerWriteOperationIfNeeded();
             return future;
         }
@@ -1354,8 +1390,12 @@ class IOSessionImpl implements IOSession {
                 safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, message);
                 return;
             }
-            onWriteQueueing(message);
-            ioThreadRequests.offerBlocking(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
+            int enqueuedBytes = onWriteQueueing(message);
+            if (offerRefused(translateSendWithCallback, message, messageSentCallback, messageSendingContext, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy)) {
+                onWriteQueueingFailed(enqueuedBytes);
+                inactiveIOWriter.send(message, messageSendingContext, messageSentCallback, ioBufferPoolByteBuffer);
+                return;
+            }
             registerWriteOperationIfNeeded();
         }
 
@@ -1379,8 +1419,12 @@ class IOSessionImpl implements IOSession {
                 ioEventsListener.onWriteFailure(ioSession, message.flip());
                 return;
             }
-            onWriteQueueing(message);
-            ioThreadRequests.offerBlocking(translateSend, message, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy);
+            int enqueuedBytes = onWriteQueueing(message);
+            if (offerRefused(translateSend, message, ioBufferPoolByteBuffer, ioThreadSocketWriteRequestsIdleStrategy)) {
+                onWriteQueueingFailed(enqueuedBytes);
+                inactiveIOWriter.send(message, ioBufferPoolByteBuffer);
+                return;
+            }
             registerWriteOperationIfNeeded();
         }
 
@@ -1408,11 +1452,17 @@ class IOSessionImpl implements IOSession {
                 safelyProcessCallbackOnIOException(writeRingFull(), null, messageSentCallback, messageSendingContext, null);
                 return;
             }
+            int enqueuedBytes = 0;
             if (writeWatermarkState.isEnabled()) {
                 // important enqueue first as the ioThreadRequests could be faster processing the byteBufferBuilder and call release() before calling getEstimatedByteBufferSize()
-                writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
+                enqueuedBytes = byteBufferBuilder.getEstimatedByteBufferSize();
+                writeWatermarkState.onEnqueued(enqueuedBytes);
             }
-            ioThreadRequests.offerBlocking(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext, ioThreadSocketWriteRequestsIdleStrategy);
+            if (offerRefused(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext, ioThreadSocketWriteRequestsIdleStrategy)) {
+                onWriteQueueingFailed(enqueuedBytes);
+                inactiveIOWriter.send(byteBufferBuilder, messageSendingContext, messageSentCallback);
+                return;
+            }
             registerWriteOperationIfNeeded();
         }
 
