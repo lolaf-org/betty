@@ -52,6 +52,7 @@ import java.util.function.Consumer;
 class IOWorkerImpl implements IOWorker {
 
     private static final long ZERO = 0L;
+    private static final ThreadLocal<Boolean> IO_WORKER_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private final AtomicBoolean running;
     @Getter
     private final String name;
@@ -209,10 +210,6 @@ class IOWorkerImpl implements IOWorker {
             selectorWakeupIfNeeded.run();
         }
         awaitIOWorkerThreadDeath();
-        // with the thread dead, a session that could not hand its disconnection over to it can have its buffers back
-        synchronized (registeredSessions) {
-            registeredSessions.forEach(IOSessionImpl::releasePooledBuffers);
-        }
         registeredSessions.clear();
         try {
             selector.close();
@@ -304,7 +301,35 @@ class IOWorkerImpl implements IOWorker {
         command.resultFuture.complete(null);
     }
 
+    static boolean isIOWorkerThread() {
+        return IO_WORKER_THREAD.get();
+    }
+
     private void runLoop() {
+        IO_WORKER_THREAD.set(Boolean.TRUE);
+        try {
+            selectUntilStopped();
+        } finally {
+            // also on an Error: a session's disconnection only ever runs on its IO thread, so this is its last chance
+            stopRegisteredSessions();
+        }
+    }
+
+    private void stopRegisteredSessions() {
+        List<IOSessionImpl> sessions;
+        synchronized (registeredSessions) {
+            sessions = List.copyOf(registeredSessions);
+        }
+        for (IOSessionImpl session : sessions) {
+            try {
+                session.stop(org.lolaf.ringos.Deadline.immediate());
+            } catch (RuntimeException ex) {
+                log.error("Failed to stop IOSession {} on IO worker {} exit", session.getId(), name, ex);
+            }
+        }
+    }
+
+    private void selectUntilStopped() {
         // on the IO thread and before the first select: an idle strategy that narrows the OS timer slack sets it on
         // whichever thread calls it, so this is the only place that can do it for the thread that will park
         selectStrategy.assignToThread(Thread.currentThread());
@@ -519,13 +544,13 @@ class IOWorkerImpl implements IOWorker {
                 return ioSession;
             } else {
                 ioSession.getIoEventsListener().onSessionRejected(ioSession);
-                ioSession.stop(org.lolaf.ringos.Deadline.immediate());
+                ioSession.closeNeverConnected();
             }
         } catch (IOException ex) {
             if (!(ex instanceof SSLHandshakeException)) {
                 ioSession.getIoEventsListener().onError(ioSession, ex);
             }
-            ioSession.stop(org.lolaf.ringos.Deadline.immediate());
+            ioSession.closeNeverConnected();
         }
         return null;
     }

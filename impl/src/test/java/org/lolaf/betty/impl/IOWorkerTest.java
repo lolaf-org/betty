@@ -149,6 +149,86 @@ class IOWorkerTest {
         await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == 0);
     }
 
+    @Test
+    void aSessionIsConnectedUntilStopReturns() throws IOException {
+        startWorker("connected-worker");
+
+        IOSession session = registerSession(new CountingListener());
+        assertThat(session.isConnected()).isTrue();
+
+        session.stop(Deadline.immediate());
+
+        assertThat(session.isConnected()).isFalse();
+    }
+
+    @Test
+    void stoppingTheWorkerDisconnectsTheSessionsStillRegistered() throws IOException {
+        startWorker("exit-worker");
+        CountDownLatch disconnected = new CountDownLatch(1);
+        registerSession(new CountingListener() {
+            @Override
+            public void onDisconnected(IOSession session) {
+                disconnected.countDown();
+            }
+        });
+
+        worker.stop(Deadline.immediate());
+
+        assertThat(disconnected.getCount()).isZero();
+        assertThat(peer.read(ByteBuffer.allocate(1))).as("the peer sees the socket closed").isEqualTo(-1);
+    }
+
+    @Test
+    void stopFromAnotherIOThreadDoesNotWaitForTheSessionIOThread() throws Exception {
+        startWorker("held-worker");
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch heldDisconnected = new CountDownLatch(1);
+        IOSession heldSession = registerSession(new IOEventsListener() {
+            @Override
+            public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
+                message.position(message.limit());
+                holding.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            @Override
+            public void onDisconnected(IOSession session) {
+                heldDisconnected.countDown();
+            }
+        });
+        writeToPeer("hold the IO thread");
+        assertThat(holding.await(10, TimeUnit.SECONDS)).as("the held worker is inside onRead").isTrue();
+
+        IOWorkerImpl stoppingWorker = new IOWorkerImpl("stopping-worker", IOWorkersGroupSettings.builder().id("stopping-worker").build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder().build()).start();
+        CountDownLatch stopReturned = new CountDownLatch(1);
+        try (SocketChannel stoppingSocket = SocketChannel.open(peerListener.getLocalAddress());
+             SocketChannel stoppingPeer = peerListener.accept()) {
+            stoppingWorker.register(true, stoppingSocket, ClientBuilder.builder().id("stopping-session").ioEventsListener(new IOEventsListener() {
+                @Override
+                public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
+                    message.position(message.limit());
+                    heldSession.stop(Deadline.immediate());
+                    stopReturned.countDown();
+                }
+            }).build());
+            stoppingPeer.write(ByteBuffer.wrap(new byte[]{1}));
+
+            assertThat(stopReturned.await(10, TimeUnit.SECONDS)).as("stop returned while the held IO thread is busy").isTrue();
+            assertThat(heldDisconnected.getCount()).as("the disconnection waits for the held IO thread").isEqualTo(1);
+            release.countDown();
+            assertThat(heldDisconnected.await(10, TimeUnit.SECONDS)).as("the held IO thread ran the disconnection").isTrue();
+        } finally {
+            release.countDown();
+            stoppingWorker.stop(Deadline.immediate());
+        }
+    }
+
     /**
      * The defect this class was written for: an IO thread held inside {@code onRead} past the stop deadline used to be
      * left running - {@code stop} logged a warning, closed the selector under it and returned as though it had

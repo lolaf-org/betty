@@ -55,7 +55,16 @@ import java.util.function.IntFunction;
 @ToString(onlyExplicitlyIncluded = true)
 class IOSessionImpl implements IOSession {
 
-    private static final long DISCONNECT_ON_IO_THREAD_MIN_WAIT_IN_MILLIS = 100L;
+    /**
+     * Stands for the IO thread until the session is attached: never started, so never the current thread and never alive.
+     */
+    private static final Thread NO_IO_THREAD = new Thread(() -> {
+    }, "no-io-thread");
+    /**
+     * Only an IO thread stuck in application code takes this long; past it, {@link #stop} returns rather than hang.
+     */
+    private static final long DISCONNECTION_TIMEOUT_IN_SECONDS = 30L;
+
     private static final BiConsumer<Runnable, Exception> DEFAULT_TASK_CALLBACK = (t, e) -> {
         if (e != null) {
             log.error("Failed to execute task", e);
@@ -78,7 +87,6 @@ class IOSessionImpl implements IOSession {
     private final boolean orderedWrites;
     @Getter(AccessLevel.PACKAGE)
     private final AtomicBoolean started;
-    private final AtomicBoolean disconnected;
     private final IntFunction<ByteBuffer> readBufferAllocator;
     @Getter(AccessLevel.PACKAGE)
     private final boolean trackReceiveTime;
@@ -88,6 +96,7 @@ class IOSessionImpl implements IOSession {
     private final Consumer<IOThreadRequest> localIOThreadWorkRequestConsumer;
     private final IOStats ioStats;
     private final CpuTimeStats cpuTimeStats;
+    private volatile ConnectionState connectionState;
     private boolean insideWriteCycle;
     private Consumer<IOSession> sessionStoppedConsumer;
     private Thread ioWorkerThread;
@@ -137,7 +146,8 @@ class IOSessionImpl implements IOSession {
         this.readBufferAllocator = ioSettings.isReadDirectBuffer() ? ByteBuffer::allocateDirect : ByteBuffer::allocate;
         this.readBuffer = readBufferAllocator.apply(ioSettings.getReadBufferSize());
         this.started = new AtomicBoolean(false);
-        this.disconnected = new AtomicBoolean(false);
+        this.connectionState = ConnectionState.NOT_CONNECTED;
+        this.ioWorkerThread = NO_IO_THREAD;
         this.localIOThreadRequest = new IOThreadRequest(0);
         this.localIOThreadWorkRequestConsumer = localIOThreadRequest::transferFromPoll;
         ioSettings.getSocketOptions().forEach((so, val) -> {
@@ -319,6 +329,7 @@ class IOSessionImpl implements IOSession {
     }
 
     void notifyConnected() {
+        connectionState = ConnectionState.CONNECTED;
         this.ioEventsListener.onConnected(this);
         this.activeIOStats.onSessionOpened(this);
     }
@@ -425,7 +436,7 @@ class IOSessionImpl implements IOSession {
                 LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
                 // unfortunately we have to wait for OS to flush last message IO even if queue is empty
             }
-            disconnectOnIOThread(flushOutgoingMessagesDeadline);
+            disconnectOnIOThread();
             if (sessionStoppedConsumer != null) {
                 sessionStoppedConsumer.accept(this);
             }
@@ -438,47 +449,43 @@ class IOSessionImpl implements IOSession {
         return selectionKey != null && selectionKey.isValid();
     }
 
-    private void disconnectOnIOThread(Deadline deadline) {
-        if (isWithinIOThread() || !hasActiveSelectionKey() || ioWorkerThread == null || !ioWorkerThread.isAlive()) {
-            disconnect();
+    private void disconnectOnIOThread() {
+        CountDownLatch disconnection = new CountDownLatch(1);
+        processTask(() -> {
+            try {
+                disconnect();
+            } finally {
+                disconnection.countDown();
+            }
+        }, (task, error) -> {
+            if (connectionState != ConnectionState.DISCONNECTED) {
+                log.error("IOSession {} has no IO thread left, it will not be disconnected", id);
+            }
+            disconnection.countDown();
+        });
+        // two IO threads each waiting for the other to disconnect one of its sessions would never wake up
+        if (disconnection.getCount() == 0 || IOWorkerImpl.isIOWorkerThread()) {
             return;
         }
-        CountDownLatch disconnectedLatch = new CountDownLatch(1);
-        AtomicBoolean ranOnIOThread = new AtomicBoolean();
-        // the latch also counts down when the task is rejected, so it says the handover is over and not that it ran
-        boolean answered = false;
         try {
-            processTask(() -> {
-                try {
-                    disconnect();
-                    ranOnIOThread.set(true);
-                } finally {
-                    disconnectedLatch.countDown();
-                }
-            }, (task, error) -> disconnectedLatch.countDown());
-            // an immediate deadline still gets a moment here: this is the difference between a clean disconnection
-            // and one leaving buffers behind, not a flush the caller asked to skip
-            answered = disconnectedLatch.await(Math.max(DISCONNECT_ON_IO_THREAD_MIN_WAIT_IN_MILLIS, deadline.getRemainingTime().toMillis()),
-                    TimeUnit.MILLISECONDS);
+            if (!disconnection.await(DISCONNECTION_TIMEOUT_IN_SECONDS, TimeUnit.SECONDS)) {
+                log.error("IOSession {} not disconnected within {}s, its IO thread {} is stuck, the session stays open until it"
+                        + " runs the disconnection", id, DISCONNECTION_TIMEOUT_IN_SECONDS, ioWorkerThread.getName());
+            }
         } catch (InterruptedException e) {
-            // the task is queued and the IO thread runs it whatever happens to this wait: disconnecting from here
-            // as well would only race it
+            // the task stays queued and the IO thread still runs it
             Thread.currentThread().interrupt();
-            return;
-        } catch (RuntimeException e) {
-            log.info("Failed to hand the disconnection of IOSession {} to its IO thread", id, e);
-        }
-        if (!ranOnIOThread.get()) {
-            log.warn("IOSession {} was {} by its IO thread, closing the socket from {} and leaving its pooled buffers"
-                            + " to be released when the IO worker stops", id,
-                    answered ? "refused" : "not disconnected within " + deadline, Thread.currentThread().getName());
-            disconnect(false);
         }
     }
 
     @Override
     public boolean isStarted() {
         return started.get();
+    }
+
+    @Override
+    public boolean isConnected() {
+        return connectionState == ConnectionState.CONNECTED;
     }
 
     /**
@@ -572,7 +579,10 @@ class IOSessionImpl implements IOSession {
             executeTask(task, callback);
             return;
         }
-        ioThreadRequests.offerBlocking(this::translateTask, task, callback, ioThreadTaskRequestsIdleStrategy);
+        if (!offerUntilQueuedOrNoIOThreadLeft(task, callback)) {
+            callback.accept(task, new EOFException("Cannot process IOTask on disconnected session " + id));
+            return;
+        }
         try {
             selectionKey.interestOpsOr(SelectionKey.OP_WRITE);
             wakeupSelectorIfNeeded.run();
@@ -583,6 +593,28 @@ class IOSessionImpl implements IOSession {
             }
             callback.accept(task, new EOFException("Cannot process IOTask on disconnected session " + id));
         }
+    }
+
+    // with no IO thread left nothing drains the queue, so a blocking offer on a full one would never return
+    private boolean offerUntilQueuedOrNoIOThreadLeft(Runnable task, BiConsumer<Runnable, Exception> callback) {
+        if (hasNoIOThreadLeft()) {
+            return false;
+        }
+        if (ioThreadRequests.offer(this::translateTask, task, callback)) {
+            return true;
+        }
+        ioThreadTaskRequestsIdleStrategy.reset();
+        do {
+            ioThreadTaskRequestsIdleStrategy.idle();
+            if (hasNoIOThreadLeft()) {
+                return false;
+            }
+        } while (!ioThreadRequests.offer(this::translateTask, task, callback));
+        return true;
+    }
+
+    private boolean hasNoIOThreadLeft() {
+        return connectionState == ConnectionState.DISCONNECTED || !ioWorkerThread.isAlive();
     }
 
     private void translateTask(IOThreadRequest wr, Runnable task, BiConsumer<Runnable, Exception> callback) {
@@ -692,7 +724,7 @@ class IOSessionImpl implements IOSession {
         }
         clearWriteInterestUnlessRequeued();
     }
-
+    
     private boolean canContinueProcessingIOThreadRequests(int maxWritableBytesCount) {
         return pendingWrite.isFullyWritten() && maxWritableBytesCount >= 0;
     }
@@ -882,16 +914,14 @@ class IOSessionImpl implements IOSession {
         return ioThreadRequests.isNotEmpty() || pendingWrite.isNotFullyWritten();
     }
 
+    /**
+     * Only ever runs on the IO thread, the single consumer of {@code ioThreadRequests}: go through {@link #stop}.
+     */
     void disconnect() {
-        disconnect(true);
-    }
-
-    void disconnect(boolean releasePooledBuffers) {
-        // the caller of stop() falls back to this once its wait for the IO thread times out, and a slow rather than
-        // stuck IO thread still runs its queued disconnection afterwards: the listener must be told once
-        if (!disconnected.compareAndSet(false, true)) {
+        if (connectionState == ConnectionState.DISCONNECTED) {
             return;
         }
+        connectionState = ConnectionState.DISCONNECTED;
         if (hasActiveSelectionKey()) {
             selectionKey.cancel();
         }
@@ -916,11 +946,9 @@ class IOSessionImpl implements IOSession {
         ioThreadRequests.clear();
         ioEventsListener.onDisconnected(this);
         activeIOStats.onSessionClosed(this);
-        if (releasePooledBuffers) {
-            // last, and not before the cancelled writes above: their callbacks are handed the very buffers this pool
-            // owns, and on a direct pool that memory is freed here, not garbage collected
-            releasePooledBuffers();
-        }
+        // last, and not before the cancelled writes above: their callbacks are handed the very buffers this pool
+        // owns, and on a direct pool that memory is freed here, not garbage collected
+        releasePooledBuffers();
     }
 
     private void safelyProcessCallbackOnDisconnection(IOThreadRequest threadRequest) {
@@ -928,10 +956,30 @@ class IOSessionImpl implements IOSession {
                 threadRequest.writeFuture, threadRequest.messageSentCallback, threadRequest.messageSendingContext, threadRequest.byteBuffer);
     }
 
+    /**
+     * Ends a session that {@link #start} refused or failed to start: {@code onConnected} never fired, so there is no
+     * queued work to cancel and no stats to close, only the socket and the buffer pool to release.
+     */
+    void closeNeverConnected() {
+        started.set(false);
+        connectionState = ConnectionState.DISCONNECTED;
+        try {
+            socket.close();
+        } catch (IOException e) {
+            log.info("Failed to close socket on IOSession {}", id, e);
+        }
+        ioEventsListener.onDisconnected(this);
+        releasePooledBuffers();
+    }
+
     void releasePooledBuffers() {
         if (!sharedIOBufferPool) {
             ioBufferPool.stop();
         }
+    }
+
+    private enum ConnectionState {
+        NOT_CONNECTED, CONNECTED, DISCONNECTED
     }
 
     private interface IOThreadSender {

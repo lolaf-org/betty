@@ -123,7 +123,11 @@ public interface IOSession extends IOWriter {
     void setId(String id);
 
     /**
-     * Stops the io Session
+     * Stops the io Session.
+     * <p>
+     * The disconnection runs on the session's IO thread and, called from outside any IO thread, this waits for it up
+     * to 30 seconds: past that the IO thread is stuck in application code, an error is logged and the session stays
+     * open until that thread gets to it. Called from an IO thread, it does not wait.
      *
      * @param stopDeadline time to wait for flushing all message to be sent before closing the session
      */
@@ -137,7 +141,17 @@ public interface IOSession extends IOWriter {
     boolean isStarted();
 
     /**
-     * Runs a task on the session's IO thread, immediately if the caller is already on it.
+     * Whether the connection is open. It can outlive {@link #isStarted()}: {@link #stop(Deadline)} marks the session
+     * stopped at once, while the connection closes only once its IO thread has run the disconnection.
+     *
+     * @return true between {@link IOEventsListener#onConnected(IOSession)} and
+     * {@link IOEventsListener#onDisconnected(IOSession)}
+     */
+    boolean isConnected();
+
+    /**
+     * Runs a task on the session's IO thread, immediately if the caller is already on it. From any other thread
+     * the task is queued, blocking until the session's bounded task queue has a free slot.
      * <p>
      * Short tasks only: the thread is shared with every other session bound to the same {@link IOWorker}, so a
      * slow task costs all of them throughput.
@@ -148,7 +162,8 @@ public interface IOSession extends IOWriter {
 
     /**
      * Runs a task on the session's IO thread, immediately if the caller is already on it, and reports what
-     * happened.
+     * happened. From any other thread the task is queued, blocking until the session's bounded task queue has a
+     * free slot.
      * <p>
      * Short tasks only: the thread is shared with every other session bound to the same {@link IOWorker}, so a
      * slow task costs all of them throughput.

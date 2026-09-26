@@ -28,6 +28,7 @@ import org.lolaf.betty.api.io.IOSessionTag;
 import org.lolaf.betty.api.settings.IOSettings;
 import org.lolaf.ringos.Deadline;
 
+import java.io.EOFException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -41,6 +42,7 @@ import java.util.function.BiConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.Mockito.*;
 
 @Slf4j
@@ -441,6 +443,31 @@ class ClientImplTest extends AbstractTest {
         clientIOsession.processTask(incrementTask::getAndIncrement);
 
         await().untilAtomic(incrementTask, Matchers.equalTo(2));
+    }
+
+    /**
+     * A stopped session has no IO thread left to run a task: it must refuse it at once, not queue it and, once the
+     * queue is full, block its caller forever.
+     */
+    @Test
+    void testTaskOnAStoppedSessionIsRefusedWithoutBlocking() {
+        setupTestEnvAndWaitForConnections();
+        clientIOsession.stop(Deadline.of(Duration.ofSeconds(1)));
+
+        int moreTasksThanTheQueueHolds = 10_000;
+        AtomicInteger refused = new AtomicInteger();
+        BiConsumer<Runnable, Exception> countRefusals = (task, error) -> {
+            if (error instanceof EOFException) {
+                refused.incrementAndGet();
+            }
+        };
+        assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+            for (int i = 0; i < moreTasksThanTheQueueHolds; i++) {
+                clientIOsession.processTask(() -> {
+                }, countRefusals);
+            }
+        });
+        assertThat(refused).hasValue(moreTasksThanTheQueueHolds);
     }
 
     @Test

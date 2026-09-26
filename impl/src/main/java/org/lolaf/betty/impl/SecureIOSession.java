@@ -39,8 +39,6 @@ import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.security.cert.Certificate;
 import java.time.Duration;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -51,7 +49,6 @@ class SecureIOSession extends IOSessionImpl {
      * purpose: this is on the shutdown path, and dropping the record beats delaying every close behind a worker
      * that is not coming back.
      */
-    private static final Duration CLOSE_NOTIFY_HANDOVER_TIMEOUT = Duration.ofMillis(500);
     private final SSLEngine sslEngine;
     private final ByteBuffer[] sourceByteBufferArray;
     private final ByteBuffer encodingWriteBuffer;
@@ -285,49 +282,9 @@ class SecureIOSession extends IOSessionImpl {
 
     @Override
     protected void disconnect() {
-        closeOutboundOnIOThread();
+        sendCloseOutboundIfNeeded();
         getIoEventsListener().onSSLSessionEnd(this, getRemotePeerCertificates());
         super.disconnect();
-    }
-
-    /**
-     * Sends the close_notify from the thread that owns every other engine call and every other socket write, rather
-     * than from whichever thread called {@code stop()}.
-     * <p>
-     * Both halves of {@link #sendCloseOutboundIfNeeded()} are unsafe off the IO thread. An {@link SSLEngine} is not
-     * thread safe across {@code wrap} and {@code unwrap} - they share the record sequence numbers a GCM nonce is
-     * built from - and a direct {@code socket.write} from a second thread can interleave the close_notify record
-     * into the middle of an application record the IO thread is still writing. The peer then reads either a length
-     * field out of alignment or a record whose MAC fails, both on its inbound path.
-     * <p>
-     * Waits, because {@link IOSessionImpl#disconnect()} cancels the key and closes the socket immediately after: a
-     * close_notify still queued at that point would be written to a closed socket. If the handover does not complete
-     * - an IO worker already on its way out has nobody left to run the task - the close_notify is dropped rather
-     * than sent from here. An unclean shutdown costs the peer a truncation warning; a raced one corrupts its stream,
-     * which is the thing being fixed.
-     */
-    private void closeOutboundOnIOThread() {
-        if (isIOThread(Thread.currentThread())) {
-            sendCloseOutboundIfNeeded();
-            return;
-        }
-        CountDownLatch sent = new CountDownLatch(1);
-        try {
-            processTask(() -> {
-                try {
-                    sendCloseOutboundIfNeeded();
-                } finally {
-                    sent.countDown();
-                }
-            });
-            if (!sent.await(CLOSE_NOTIFY_HANDOVER_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
-                log.info("Timed out handing close_notify to the IO thread of session {}, closing without it", getId());
-            }
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-        } catch (Exception ex) {
-            log.info("Unable to hand close_notify to the IO thread of session {}, closing without it: {}", getId(), ex.getMessage());
-        }
     }
 
     @Override

@@ -9,6 +9,21 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
+## [0.9.2] - 2026-09-26
+
+### Added
+
+- **`IOSession.isConnected()`**, true from `IOEventsListener.onConnected` until `IOEventsListener.onDisconnected`.
+
+### Fixed
+
+- **`processTask` rejects a task once the session has no IO thread left.** A task submitted from another thread to a
+  disconnected session, or one whose IO worker is gone, is handed to its callback with an `EOFException` instead of
+  being queued where nothing would ever run it. Once the queue was full, such a call used to block forever.
+- **`stop()` on a session is more reliable.** It no longer closes the connection in an unsafe way after a short timeout;
+  it waits, up to 30 seconds, until the session is fully closed. Stopping an `IOWorker` now also closes the sessions still
+  running on it, and a session rejected by the `RemoteSessionsFilter` no longer receives `onShutdown`.
+
 ## [0.9.1] - 2026-09-21
 
 ### Fixed
