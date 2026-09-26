@@ -72,7 +72,7 @@ class IOWorkerImpl implements IOWorker {
     private final ExponentialMovingAverage loadEma;
     private final RingBuffer<IOWorkerCommand> pendingCommands;
     // only ever used under the pendingCommands lock, so by one thread at a time
-    private final RetryStrategy commandsRetryStrategy = RetryStrategy.idlingWhile(new BackoffIdleStrategy(), () -> !commandsClosed);
+    private final RetryStrategy commandsRetryStrategy;
     @Getter
     private Selector selector;
     private Selector optimizedSelector;
@@ -103,6 +103,7 @@ class IOWorkerImpl implements IOWorker {
         this.statsTask = this::runStats;
         this.ioSessionRingBufferStates = new ConcurrentHashMap<>();
         this.pendingCommands = RingBufferFactory.build(RingBufferFactory.AccessType.SINGLE_CONSUMER_MULTI_PRODUCER, PENDING_COMMANDS_CAPACITY, IOWorkerCommand::new);
+        this.commandsRetryStrategy = RetryStrategy.idlingWhile(new BackoffIdleStrategy(), () -> !commandsClosed);
         ioWorkerThread = threadGroup.getThreadFactory().newThread(this::runLoop);
         ioWorkerThread.setName(this.name);
         ioWorkerThread.setDaemon(true);
