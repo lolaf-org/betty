@@ -31,6 +31,7 @@ import org.lolaf.betty.api.settings.SSLSettings;
 import org.lolaf.betty.api.ss.SelectStrategy;
 import org.lolaf.betty.api.stats.IOWorkerStats;
 import org.lolaf.ringos.idling.BackoffIdleStrategy;
+import org.lolaf.ringos.idling.RetryStrategy;
 import org.lolaf.ringos.rb.RingBuffer;
 import org.lolaf.ringos.rb.RingBufferFactory;
 
@@ -70,6 +71,8 @@ class IOWorkerImpl implements IOWorker {
     private final Thread ioWorkerThread;
     private final ExponentialMovingAverage loadEma;
     private final RingBuffer<IOWorkerCommand> pendingCommands;
+    // only ever used under the pendingCommands lock, so by one thread at a time
+    private final RetryStrategy commandsRetryStrategy = RetryStrategy.idlingWhile(new BackoffIdleStrategy(), () -> !commandsClosed);
     @Getter
     private Selector selector;
     private Selector optimizedSelector;
@@ -81,6 +84,7 @@ class IOWorkerImpl implements IOWorker {
     private int pendingHandshakesCount;
     private boolean enabledStatistics;
     private volatile boolean hasPendingCommands;
+    private volatile boolean commandsClosed;
     private Runnable selectorWakeupIfNeeded;
 
     IOWorkerImpl(String name, IOWorkersGroupSettings ioWorkersGroupSettings, IOWorkersGroupSettings.IOThreadGroup threadGroup) {
@@ -105,6 +109,9 @@ class IOWorkerImpl implements IOWorker {
         ioWorkerThread.setUncaughtExceptionHandler((t, e) -> log.error("CRITICAL: uncaught exception in IO Thread {}", t.getName(), e));
     }
 
+    static boolean isIOWorkerThread() {
+        return IO_WORKER_THREAD.get();
+    }
 
     @Override
     public double getLoad() {
@@ -255,18 +262,30 @@ class IOWorkerImpl implements IOWorker {
             return CompletableFuture.failedFuture(new IllegalStateException("Session " + session + " is not registered"));
         }
         CompletableFuture<Void> future = new CompletableFuture<>();
-        submitMigration(CommandType.DETACH, (IOSessionImpl) session, (IOWorkerImpl) target, future);
+        if (!submitMigration(CommandType.DETACH, (IOSessionImpl) session, (IOWorkerImpl) target, future)) {
+            future.completeExceptionally(stoppedException());
+        }
         return future;
     }
 
-    private void submitMigration(CommandType type, IOSessionImpl session, IOWorkerImpl target, CompletableFuture<Void> future) {
-        pendingCommands.offerBlocking(IOWorkerCommand::translateMigration, type, target, session, future, new BackoffIdleStrategy());
+    private boolean submitMigration(CommandType type, IOSessionImpl session, IOWorkerImpl otherWorker, CompletableFuture<Void> future) {
+        synchronized (pendingCommands) {
+            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateMigration, type, otherWorker, session, future, commandsRetryStrategy)) {
+                return false;
+            }
+        }
         signalPendingCommands();
+        return true;
     }
 
-    private void submitRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
-        pendingCommands.offerBlocking(IOWorkerCommand::translateRegistration, clientSession, socket, baseBuilder, new BackoffIdleStrategy());
+    private boolean submitRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
+        synchronized (pendingCommands) {
+            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateRegistration, clientSession, socket, baseBuilder, commandsRetryStrategy)) {
+                return false;
+            }
+        }
         signalPendingCommands();
+        return true;
     }
 
     private void signalPendingCommands() {
@@ -274,6 +293,10 @@ class IOWorkerImpl implements IOWorker {
         if (selectorWakeupIfNeeded != null) {
             selectorWakeupIfNeeded.run();
         }
+    }
+
+    private IllegalStateException stoppedException() {
+        return new IllegalStateException("IO worker " + name + " is stopped");
     }
 
     private void onIOWorkerCommand(IOWorkerCommand cmd) {
@@ -305,13 +328,30 @@ class IOWorkerImpl implements IOWorker {
 
     private void onIOWorkerCommandAfterStop(IOWorkerCommand cmd) {
         try {
-            if (cmd.type == CommandType.REGISTER) {
-                closeQuietly(cmd.socket);
-            } else {
-                cmd.resultFuture.completeExceptionally(new IllegalStateException("IO worker " + name + " is stopped"));
+            switch (cmd.type) {
+                case REGISTER:
+                    closeQuietly(cmd.socket);
+                    break;
+                case DETACH:
+                    // the session is still registered here: stopRegisteredSessions closes it next
+                    cmd.resultFuture.completeExceptionally(stoppedException());
+                    break;
+                case ATTACH:
+                    cmd.resultFuture.completeExceptionally(stoppedException());
+                    returnToOrigin(cmd.session, cmd.otherWorker);
+                    break;
+                default:
+                    throw new IllegalStateException("Unhandled command " + cmd.type);
             }
         } finally {
             cmd.clean();
+        }
+    }
+
+    private void returnToOrigin(IOSessionImpl session, IOWorkerImpl origin) {
+        if (!origin.submitMigration(CommandType.ATTACH, session, this, new CompletableFuture<>())) {
+            log.error("IOSession {} lost both its IO workers during a migration, closing it", session.getId());
+            session.closeNeverConnected();
         }
     }
 
@@ -331,22 +371,24 @@ class IOWorkerImpl implements IOWorker {
         registeredSessions.remove(session);
         ioSessionRingBufferStates.remove(session);
         computeTrackReceiveTime();
-        command.target.submitMigration(CommandType.ATTACH, session, null, command.resultFuture);
+        if (!command.otherWorker.submitMigration(CommandType.ATTACH, session, this, command.resultFuture)) {
+            attach(session);
+            command.resultFuture.completeExceptionally(command.otherWorker.stoppedException());
+        }
     }
 
     private void handleAttach(IOWorkerCommand command) throws IOException {
-        IOSessionImpl session = command.session;
+        attach(command.session);
+        command.resultFuture.complete(null);
+    }
+
+    private void attach(IOSessionImpl session) throws IOException {
         session.attachToIOWorker(selector, selectStrategy, this::onSessionStopped, this::onIOSessionTasksBufferFull,
                 this::onIOSessionWritesBufferFull, this.ioWorkerThread, this);
         registeredSessions.add(session);
         ioSessionRingBufferStates.put(session, new RingBufferStates());
         computeTrackReceiveTime();
         log.info("IOSession {} has been attached to IOWorker {}", session.getId(), this.getName());
-        command.resultFuture.complete(null);
-    }
-
-    static boolean isIOWorkerThread() {
-        return IO_WORKER_THREAD.get();
     }
 
     private void runLoop() {
@@ -355,6 +397,10 @@ class IOWorkerImpl implements IOWorker {
             selectUntilStopped();
         } finally {
             // also on an Error: a session's disconnection only ever runs on its IO thread, so this is its last chance
+            commandsClosed = true;
+            synchronized (pendingCommands) {
+                // waits out a producer still offering: its command is queued, or it has seen the queue closed
+            }
             while (pendingCommands.poll(this::onIOWorkerCommandAfterStop)) {
                 // drain
             }
@@ -539,10 +585,9 @@ class IOWorkerImpl implements IOWorker {
             registerInternal(clientSession, socket, baseBuilder);
             return;
         }
-        if (!running.get()) {
+        if (!running.get() || !submitRegistration(clientSession, socket, baseBuilder)) {
             throw new IOException("IO worker " + name + " is not running");
         }
-        submitRegistration(clientSession, socket, baseBuilder);
     }
 
     /**
@@ -653,28 +698,29 @@ class IOWorkerImpl implements IOWorker {
         return name + ", sessionsCount=" + registeredSessions.size();
     }
 
+    private enum CommandType {
+        REGISTER, DETACH, ATTACH
+    }
+
     @Value
     private static class RingBufferStates {
         AtomicBoolean writesBufferFull = new AtomicBoolean();
         AtomicBoolean tasksBufferFull = new AtomicBoolean();
     }
 
-    private enum CommandType {
-        REGISTER, DETACH, ATTACH
-    }
-
     private static final class IOWorkerCommand {
         private CommandType type;
-        private IOWorkerImpl target;
+        // the target of a DETACH, the origin of an ATTACH
+        private IOWorkerImpl otherWorker;
         private IOSessionImpl session;
         private CompletableFuture<Void> resultFuture;
         private boolean clientSession;
         private SocketChannel socket;
         private BaseBuilder baseBuilder;
 
-        void translateMigration(CommandType type, IOWorkerImpl target, IOSessionImpl session, CompletableFuture<Void> resultFuture) {
+        void translateMigration(CommandType type, IOWorkerImpl otherWorker, IOSessionImpl session, CompletableFuture<Void> resultFuture) {
             this.type = type;
-            this.target = target;
+            this.otherWorker = otherWorker;
             this.session = session;
             this.resultFuture = resultFuture;
         }
@@ -689,7 +735,7 @@ class IOWorkerImpl implements IOWorker {
         void clean() {
             type = null;
             session = null;
-            target = null;
+            otherWorker = null;
             resultFuture = null;
             socket = null;
             baseBuilder = null;

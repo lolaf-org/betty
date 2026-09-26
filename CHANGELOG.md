@@ -33,6 +33,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
 - **A session closed while starting no longer stays counted in its `IOWorker`.** This happened on a TLS handshake
   failing at once, or a `stop()` from `onConnected`. A TLS handshake that cannot even begin now triggers
   `onFailedSSLHandshake`.
+- **Migrating a session to a stopped `IOWorker` fails instead of hanging.** The returned future never completed and the
+  session stopped being served; the future now fails and the session stays on its worker.
 
 ## [0.9.1] - 2026-09-21
 

@@ -440,6 +440,34 @@ class IOWorkerTest {
     }
 
     @Test
+    void registeringOnAStoppedWorkerIsRefused() throws IOException {
+        startWorker("stopped-worker").stop(Deadline.immediate());
+        registeredSocket = SocketChannel.open(peerListener.getLocalAddress());
+        peer = peerListener.accept();
+
+        assertThatThrownBy(() -> worker.register(true, registeredSocket,
+                ClientBuilder.builder().id("late-session").ioEventsListener(new CountingListener()).build()))
+                .isInstanceOf(IOException.class);
+    }
+
+    @Test
+    void aMigrationToAStoppedWorkerFailsAndLeavesTheSessionWhereItWas() throws Exception {
+        startWorker("migration-origin");
+        CountingListener listener = new CountingListener();
+        IOSession session = registerSession(listener);
+        IOWorkerImpl stoppedTarget = new IOWorkerImpl("stopped-target", IOWorkersGroupSettings.builder().id("stopped-target").build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder().build()).start().stop(Deadline.immediate());
+
+        CompletableFuture<Void> migration = worker.migrateIOSession(session, stoppedTarget);
+
+        await().atMost(Duration.ofSeconds(10)).until(migration::isDone);
+        assertThat(migration).isCompletedExceptionally();
+        assertThat(worker.getRegisteredSessions()).containsExactly(session);
+        writeToPeer("still served");
+        await().atMost(Duration.ofSeconds(10)).until(() -> listener.bytesRead.get() == "still served".length());
+    }
+
+    @Test
     void aSessionRegisteredFromAnotherThreadIsConnectedOnItsIOThread() throws Exception {
         startWorker("registering-worker");
         AtomicReference<Thread> connectedOn = new AtomicReference<>();
