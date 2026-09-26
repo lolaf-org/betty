@@ -35,6 +35,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -291,6 +292,63 @@ class IOWorkerTest {
         } finally {
             release.countDown();
             stoppingWorker.stop(Deadline.immediate());
+        }
+    }
+
+    @Test
+    void aSessionStoppedDuringAMigrationIsDisconnectedOnTheTargetWorker() throws Exception {
+        startWorker("migration-source");
+        AtomicReference<Thread> disconnectedOn = new AtomicReference<>();
+        CountDownLatch disconnected = new CountDownLatch(1);
+        IOSession migrating = registerSession(new CountingListener() {
+            @Override
+            public void onDisconnected(IOSession session) {
+                disconnectedOn.set(Thread.currentThread());
+                disconnected.countDown();
+            }
+        });
+
+        IOWorkerImpl target = new IOWorkerImpl("migration-target", IOWorkersGroupSettings.builder().id("migration-target").build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder().build()).start();
+        AtomicReference<Thread> targetThread = new AtomicReference<>();
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (SocketChannel heldSocket = SocketChannel.open(peerListener.getLocalAddress());
+             SocketChannel heldPeer = peerListener.accept()) {
+            target.register(true, heldSocket, ClientBuilder.builder().id("held-session").ioEventsListener(new IOEventsListener() {
+                @Override
+                public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
+                    message.position(message.limit());
+                    targetThread.set(Thread.currentThread());
+                    holding.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }).build());
+            heldPeer.write(ByteBuffer.wrap(new byte[]{1}));
+            assertThat(holding.await(10, TimeUnit.SECONDS)).as("the target worker is inside onRead").isTrue();
+
+            CompletableFuture<Void> migration = worker.migrateIOSession(migrating, target);
+            await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == 0);
+            Thread stopper = new Thread(() -> migrating.stop(Deadline.immediate()), "migrating-session-stopper");
+            stopper.start();
+            await().atMost(Duration.ofSeconds(10)).until(() -> stopper.getState() == Thread.State.TIMED_WAITING);
+            assertThat(disconnected.getCount()).as("the detached session waits for its target worker").isEqualTo(1);
+
+            release.countDown();
+
+            stopper.join(10_000);
+            assertThat(stopper.isAlive()).as("stop returned").isFalse();
+            assertThat(disconnected.getCount()).isZero();
+            assertThat(disconnectedOn.get()).as("disconnected on the target IO thread").isSameAs(targetThread.get());
+            assertThat(migration).isCompleted();
+            assertThat(peer.read(ByteBuffer.allocate(1))).as("the peer sees the socket closed").isEqualTo(-1);
+        } finally {
+            release.countDown();
+            target.stop(Deadline.immediate());
         }
     }
 

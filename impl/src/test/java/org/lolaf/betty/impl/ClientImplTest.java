@@ -26,6 +26,7 @@ import org.lolaf.betty.api.ServerBuilder;
 import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.io.IOSessionTag;
 import org.lolaf.betty.api.settings.IOSettings;
+import org.lolaf.betty.api.stats.IOStats;
 import org.lolaf.ringos.Deadline;
 
 import java.io.EOFException;
@@ -563,5 +564,25 @@ class ClientImplTest extends AbstractTest {
         await().untilAsserted(() -> verify(serverIoEventsListener).onSessionRejected(any()));
         await().untilAsserted(() -> verify(serverIoEventsListener).onDisconnected(any()));
         await().untilAsserted(() -> assertThat(client.isConnected()).isFalse());
+    }
+
+    @Test
+    void aRejectedSessionIsNeitherShutDownNorCountedAsClosed() {
+        IOStats serverStats = mock(IOStats.class);
+        when(serverStats.enabledByDefault()).thenReturn(true);
+        setupTestEnv(getTestClientBuilder(), getTestServerBuilder().toBuilder()
+                .remoteSessionsFilter((remoteAddress, remoteCertificates) -> false)
+                .ioStatsProvider(session -> serverStats)
+                .build());
+
+        server.start();
+        client.start();
+
+        await().untilAsserted(() -> verify(serverIoEventsListener).onDisconnected(any()));
+        verify(serverIoEventsListener).onSessionRejected(any());
+        verify(serverIoEventsListener, never()).onConnected(any());
+        verify(serverIoEventsListener, never()).onShutdown(any());
+        verify(serverStats, never()).onSessionOpened(any());
+        verify(serverStats, never()).onSessionClosed(any());
     }
 }
