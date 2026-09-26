@@ -22,6 +22,7 @@ import org.lolaf.betty.api.ClientBuilder;
 import org.lolaf.betty.api.io.IOEventsListener;
 import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
+import org.lolaf.betty.api.settings.SSLSettings;
 import org.lolaf.betty.api.ss.IdleStrategySelectStrategy;
 import org.lolaf.ringos.Deadline;
 import org.lolaf.ringos.idling.BusySpinIdleStrategy;
@@ -31,6 +32,7 @@ import org.lolaf.ringos.idling.WaitNotifyIdleStrategy;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
@@ -42,6 +44,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+
+import javax.net.ssl.SSLHandshakeException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -350,6 +354,89 @@ class IOWorkerTest {
             release.countDown();
             target.stop(Deadline.immediate());
         }
+    }
+
+    @Test
+    void aTLSSessionFailingItsHandshakeOnStartIsReportedOnceAndNotLeftRegistered() throws Exception {
+        startWorker("tls-failing-worker");
+        registeredSocket = SocketChannel.open(peerListener.getLocalAddress());
+        peer = peerListener.accept();
+        peer.setOption(StandardSocketOptions.SO_LINGER, 0);
+        peer.close();
+        assertThatThrownBy(() -> registeredSocket.read(ByteBuffer.allocate(1))).as("the reset reached the socket").isInstanceOf(IOException.class);
+        AtomicInteger errors = new AtomicInteger();
+        CountDownLatch disconnected = new CountDownLatch(1);
+
+        worker.register(true, registeredSocket, ClientBuilder.builder().id("tls-failing-session")
+                .SSLSettings(SSLSettings.builder().sslContext(AbstractTest.getClientSSLContext()).build())
+                .ioEventsListener(new CountingListener() {
+                    @Override
+                    public void onError(IOSession session, Exception error) {
+                        errors.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onDisconnected(IOSession session) {
+                        disconnected.countDown();
+                    }
+                }).build());
+
+        assertThat(disconnected.await(10, TimeUnit.SECONDS)).isTrue();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(worker.getRegisteredSessions()).isEmpty());
+        assertThat(errors).hasValue(1);
+    }
+
+    @Test
+    void aTLSSessionWhoseHandshakeCannotBeginIsReportedAndNotLeftRegistered() throws Exception {
+        startWorker("tls-begin-failing-worker");
+        registeredSocket = SocketChannel.open(peerListener.getLocalAddress());
+        peer = peerListener.accept();
+        AtomicInteger failedHandshakes = new AtomicInteger();
+        CountDownLatch disconnected = new CountDownLatch(1);
+
+        worker.register(true, registeredSocket, ClientBuilder.builder().id("tls-begin-failing-session")
+                .SSLSettings(SSLSettings.builder().sslContext(AbstractTest.getClientSSLContext())
+                        .engineSetupForSecureSession(engine -> engine.setEnabledProtocols(new String[0])).build())
+                .ioEventsListener(new CountingListener() {
+                    @Override
+                    public void onFailedSSLHandshake(IOSession session, SSLHandshakeException e) {
+                        failedHandshakes.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onDisconnected(IOSession session) {
+                        disconnected.countDown();
+                    }
+                }).build());
+
+        assertThat(disconnected.await(10, TimeUnit.SECONDS)).isTrue();
+        assertThat(failedHandshakes).hasValue(1);
+        assertThat(worker.getRegisteredSessions()).isEmpty();
+    }
+
+    @Test
+    void aSessionStoppedInOnConnectedIsNotLeftRegistered() throws Exception {
+        startWorker("stopped-on-connect-worker");
+        registeredSocket = SocketChannel.open(peerListener.getLocalAddress());
+        peer = peerListener.accept();
+        CountDownLatch disconnected = new CountDownLatch(1);
+
+        worker.register(true, registeredSocket, ClientBuilder.builder().id("stopped-on-connect-session")
+                .ioEventsListener(new CountingListener() {
+                    @Override
+                    public void onConnected(IOSession session) {
+                        session.stop(Deadline.immediate());
+                    }
+
+                    @Override
+                    public void onDisconnected(IOSession session) {
+                        disconnected.countDown();
+                    }
+                }).build());
+
+        assertThat(disconnected.await(10, TimeUnit.SECONDS)).isTrue();
+        assertThat(worker.getRegisteredSessions()).isEmpty();
+        assertThat(peer.read(ByteBuffer.allocate(1))).as("the peer sees the socket closed").isEqualTo(-1);
     }
 
     @Test

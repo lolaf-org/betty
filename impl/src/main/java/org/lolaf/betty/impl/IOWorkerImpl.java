@@ -589,6 +589,10 @@ class IOWorkerImpl implements IOWorker {
         try {
             if (ioSession.start(selector, selectStrategy, this::onSessionStopped, this::onIOSessionTasksBufferFull,
                     this::onIOSessionWritesBufferFull, ioWorkerThread, this)) {
+                if (!ioSession.isStarted()) {
+                    // stopped from inside start, by a failed TLS handshake or a stop() in onConnected: already cleaned up
+                    return null;
+                }
                 registeredSessions.add(ioSession);
                 ioSessionRingBufferStates.put(ioSession, new RingBufferStates());
                 computeTrackReceiveTime();
@@ -601,7 +605,9 @@ class IOWorkerImpl implements IOWorker {
                 ioSession.closeNeverConnected();
             }
         } catch (IOException ex) {
-            if (!(ex instanceof SSLHandshakeException)) {
+            if (ex instanceof SSLHandshakeException) {
+                ioSession.getIoEventsListener().onFailedSSLHandshake(ioSession, (SSLHandshakeException) ex);
+            } else {
                 ioSession.getIoEventsListener().onError(ioSession, ex);
             }
             ioSession.closeNeverConnected();

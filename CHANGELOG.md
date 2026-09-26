@@ -30,6 +30,9 @@ matching `[x.y.z]:` link definition at the foot of the file.
   full as the session closed, the call waited forever; it now fails like a send to a stopped session.
 - **`onConnected` always runs on the session's IO thread.** A socket passed to `IOWorker.register` from another thread
   used to get its `onConnected` on that thread.
+- **A session closed while starting no longer stays counted in its `IOWorker`.** This happened on a TLS handshake
+  failing at once, or a `stop()` from `onConnected`. A TLS handshake that cannot even begin now triggers
+  `onFailedSSLHandshake`.
 
 ## [0.9.1] - 2026-09-21
 
