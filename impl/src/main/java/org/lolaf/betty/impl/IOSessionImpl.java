@@ -372,6 +372,13 @@ class IOSessionImpl implements IOSession {
         this.selectionKey = socket.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, this);
     }
 
+    /**
+     * Called on the new IO thread once a migration has registered the session there.
+     */
+    void onAttached() {
+        // nothing by default
+    }
+
     @Override
     public NetworkChannel getNetworkChannel() {
         return socket;

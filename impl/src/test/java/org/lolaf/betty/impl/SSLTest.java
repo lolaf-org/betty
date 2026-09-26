@@ -16,9 +16,12 @@
 package org.lolaf.betty.impl;
 
 import org.lolaf.ringos.Deadline;
+import org.lolaf.betty.api.ServerBuilder;
+import org.lolaf.betty.api.ClientBuilder;
 import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.io.IOWorker;
 import org.lolaf.betty.api.settings.IOSettings;
+import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
 import org.lolaf.betty.api.settings.SSLSettings;
 import org.lolaf.betty.api.settings.ServerSSLSettings;
 import org.hamcrest.Matchers;
@@ -34,6 +37,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.Certificate;
@@ -41,6 +45,7 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -56,6 +61,93 @@ class SSLTest extends AbstractTest {
         return ((ServerImpl) server).getIoWorkersGroup().getIOWorkers().stream()
                 .mapToInt(IOWorker::getRegisteredSessionsCount)
                 .sum();
+    }
+
+    @Test
+    void aHandshakeRunsOnTheAcceptorAndTheSessionIsServedByItsTargetWorker() {
+        int port = TestPorts.findFree();
+        setupTestEnv(sslClientBuilder(port), sslServerBuilderWithSeparateAcceptor(port, Duration.ofSeconds(10)));
+        AtomicReference<String> handshakeOn = new AtomicReference<>();
+        AtomicReference<String> connectedOn = new AtomicReference<>();
+        AtomicReference<String> readOn = new AtomicReference<>();
+        doAnswer(invocation -> {
+            handshakeOn.set(Thread.currentThread().getName());
+            return null;
+        }).when(serverIoEventsListener).onSSLHandshake(any(), any());
+        doAnswer(invocation -> {
+            connectedOn.set(Thread.currentThread().getName());
+            return null;
+        }).when(serverIoEventsListener).onConnected(any());
+        doAnswer(invocation -> {
+            ByteBuffer message = invocation.getArgument(1);
+            message.position(message.limit());
+            readOn.set(Thread.currentThread().getName());
+            return null;
+        }).when(serverIoEventsListener).onRead(any(), any(), anyLong());
+
+        startAndWaitForConnections();
+        clientIOsession.send("hello".getBytes(StandardCharsets.UTF_8));
+
+        await().until(() -> readOn.get() != null);
+        assertThat(handshakeOn.get()).contains("tls-acceptor");
+        assertThat(connectedOn.get()).contains("tls-sessions");
+        assertThat(readOn.get()).isEqualTo(connectedOn.get());
+    }
+
+    @Test
+    void withoutAnAcceptorGroupTheHandshakeRunsOnTheSessionIOThread() {
+        int port = TestPorts.findFree();
+        setupTestEnv(sslClientBuilder(port), getTestServerBuilder(port).toBuilder()
+                .serverSSLSettings(ServerSSLSettings.builder().sslContext(getServerSSLContext()).build())
+                .ioWorkersGroup(IOWorkersGroupSettings.builder().id("tls-shared")
+                        .ioWorkerLoadBalancer((channel, ioWorkers) -> channel instanceof ServerSocketChannel ? ioWorkers[0] : ioWorkers[1])
+                        .clearIoThreadGroups()
+                        .ioThreadGroup(IOWorkersGroupSettings.IOThreadGroup.builder().ioThreadCount(2).build())
+                        .build().newInstance())
+                .build());
+        AtomicReference<String> handshakeOn = new AtomicReference<>();
+        AtomicReference<String> connectedOn = new AtomicReference<>();
+        doAnswer(invocation -> {
+            handshakeOn.set(Thread.currentThread().getName());
+            return null;
+        }).when(serverIoEventsListener).onSSLHandshake(any(), any());
+        doAnswer(invocation -> {
+            connectedOn.set(Thread.currentThread().getName());
+            return null;
+        }).when(serverIoEventsListener).onConnected(any());
+
+        startAndWaitForConnections();
+
+        assertThat(handshakeOn.get()).endsWith("tls-shared-1").isEqualTo(connectedOn.get());
+    }
+
+    @Test
+    void aSilentPeerIsTimedOutByTheAcceptorRunningItsHandshake() throws IOException {
+        int port = TestPorts.findFree();
+        setupTestEnv(sslClientBuilder(port), sslServerBuilderWithSeparateAcceptor(port, Duration.ofMillis(300)));
+        server.start();
+
+        try (SocketChannel silentPeer = SocketChannel.open(new InetSocketAddress("localhost", port))) {
+            verify(serverIoEventsListener, timeout(5_000)).onFailedSSLHandshake(any(), any());
+            ByteBuffer alert = ByteBuffer.allocate(1024);
+            while (silentPeer.read(alert) >= 0) {
+                alert.clear();
+            }
+        }
+    }
+
+    private static ClientBuilder sslClientBuilder(int port) {
+        return getTestClientBuilder(port).toBuilder()
+                .SSLSettings(SSLSettings.builder().sslContext(getClientSSLContext()).build())
+                .build();
+    }
+
+    private static ServerBuilder sslServerBuilderWithSeparateAcceptor(int port, Duration handshakeTimeout) {
+        return getTestServerBuilder(port).toBuilder()
+                .serverSSLSettings(ServerSSLSettings.builder().sslContext(getServerSSLContext()).handshakeTimeout(handshakeTimeout).build())
+                .acceptorIoWorkerGroup(IOWorkersGroupSettings.builder().id("tls-acceptor").build().newInstance())
+                .ioWorkersGroup(IOWorkersGroupSettings.builder().id("tls-sessions").build().newInstance())
+                .build();
     }
 
     @Test

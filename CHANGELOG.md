@@ -35,6 +35,14 @@ matching `[x.y.z]:` link definition at the foot of the file.
   `onFailedSSLHandshake`.
 - **Migrating a session to a stopped `IOWorker` fails instead of hanging.** The returned future never completed and the
   session stopped being served; the future now fails and the session stays on its worker.
+- **With an `acceptorIoWorkerGroup`, a server's TLS handshake runs entirely on the acceptor.** Only its first step did;
+  the rest ran on the worker chosen for the session, adding latency to that worker's other sessions. The session now
+  moves once the handshake is done: `onSSLHandshake` runs on the acceptor, `onConnected` on the session's worker.
+  Without an acceptor group, the whole handshake runs on the session's worker.
+- **A TLS client that connects and then sends nothing is closed after the handshake timeout** when the server routes
+  it to another worker than the one accepting. It used to stay open.
+- **`migrateIOSession` called from a callback no longer risks hanging the `IOWorker`.** When too many commands were
+  already pending on that worker, the IO thread waited for itself forever; the returned future now fails instead.
 
 ## [0.9.1] - 2026-09-21
 

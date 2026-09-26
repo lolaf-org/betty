@@ -44,25 +44,18 @@ import java.util.function.Consumer;
 @Slf4j
 class SecureIOSession extends IOSessionImpl {
 
-    /**
-     * How long {@link #closeOutboundOnIOThread()} waits for the IO thread to send the close_notify. Short on
-     * purpose: this is on the shutdown path, and dropping the record beats delaying every close behind a worker
-     * that is not coming back.
-     */
     private final SSLEngine sslEngine;
     private final ByteBuffer[] sourceByteBufferArray;
     private final ByteBuffer encodingWriteBuffer;
-    /** True while {@link #encodingWriteBuffer} is flipped and holds a record the socket has not finished taking. */
-    private boolean encodedBytesPending;
     private final ByteBuffer[] decodingReadBuffer;
     private final Duration handshakeTimeout;
-    /**
-     * The handshake in progress, and whether it still is. Both are touched only by the IO worker thread owning the
-     * session, except {@link #handshaking} which the worker loop reads while sweeping for expired handshakes.
-     */
+    private boolean encodedBytesPending;
     private SSLHandshake handshake;
     private volatile boolean handshaking = true;
     private volatile long handshakeDeadlineInNanos;
+    private IOWorkerImpl handOffTarget;
+    private boolean connectOnAttach;
+    private long handshakeDoneTimeInNanos;
 
     public SecureIOSession(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder, IOSettings ioSettings, RemoteSessionsFilter remoteSessionsFilter,
                            IOBufferPool sharedIOBufferPool, IOWorkersGroupSettings ioWorkersGroupSettings) {
@@ -189,6 +182,39 @@ class SecureIOSession extends IOSessionImpl {
         }
         getIoEventsListener().onSSLHandshake(this, getRemotePeerCertificates());
         log.info("SSL handshake success for {}", getId());
+        if (handOffTarget != null) {
+            IOWorkerImpl target = handOffTarget;
+            handOffTarget = null;
+            connectOnAttach = true;
+            handshakeDoneTimeInNanos = localReceiveTimeInNanos;
+            setInterestOps(0);
+            if (((IOWorkerImpl) getOwnerWorker()).handOff(this, target)) {
+                return;
+            }
+            connectOnAttach = false;
+        }
+        completeConnection(localReceiveTimeInNanos);
+    }
+
+    void handOffAfterHandshake(IOWorkerImpl target) {
+        handOffTarget = target;
+    }
+
+    @Override
+    void onAttached() {
+        if (!connectOnAttach) {
+            return;
+        }
+        connectOnAttach = false;
+        try {
+            completeConnection(handshakeDoneTimeInNanos);
+        } catch (IOException e) {
+            getIoEventsListener().onError(this, e);
+            stop(Deadline.immediate());
+        }
+    }
+
+    private void completeConnection(long localReceiveTimeInNanos) throws IOException {
         setInterestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
         notifyConnected();
         // last, so that a peer which sent application data behind its last handshake record still sees onConnected
@@ -271,6 +297,9 @@ class SecureIOSession extends IOSessionImpl {
      */
     @Override
     void onOperationWriteInternal() throws IOException {
+        if (connectOnAttach) {
+            return;
+        }
         if (handshaking) {
             // a write readiness rather than a read, so nothing was received now: the handshake may still read from
             // the socket on its way through, and anything it carries over is timestamped as of here
@@ -345,6 +374,9 @@ class SecureIOSession extends IOSessionImpl {
 
     @Override
     void onOperationReadInternal(long localReceiveTimeInNanos) throws IOException {
+        if (connectOnAttach) {
+            return;
+        }
         if (handshaking) {
             advanceHandshake(localReceiveTimeInNanos);
             return;

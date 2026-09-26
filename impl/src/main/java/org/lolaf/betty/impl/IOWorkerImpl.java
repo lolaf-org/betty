@@ -52,10 +52,21 @@ import java.util.function.Consumer;
 @Slf4j
 class IOWorkerImpl implements IOWorker {
 
-    private static final long ZERO = 0L;
+    private static final long RECEIVE_TIME_NOT_TAKEN = 0L;
     // a power of two, as the ring buffer requires; offering to a full queue blocks, so it bounds a burst of commands
     private static final int PENDING_COMMANDS_CAPACITY = Integer.getInteger("IOWorker.pending.commands.capacity", 16);
     private static final ThreadLocal<Boolean> IO_WORKER_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    // the IO thread is the queue's only consumer: waiting for room on its own queue would wait for itself
+    private static final RetryStrategy NO_RETRY = new RetryStrategy() {
+        @Override
+        public void reset() {
+        }
+
+        @Override
+        public boolean awaitRetry() {
+            return false;
+        }
+    };
     private final AtomicBoolean running;
     @Getter
     private final String name;
@@ -264,14 +275,15 @@ class IOWorkerImpl implements IOWorker {
         }
         CompletableFuture<Void> future = new CompletableFuture<>();
         if (!submitMigration(CommandType.DETACH, (IOSessionImpl) session, (IOWorkerImpl) target, future)) {
-            future.completeExceptionally(stoppedException());
+            future.completeExceptionally(commandsClosed ? stoppedException()
+                    : new IllegalStateException("IO worker " + name + " has too many pending commands to migrate from its own IO thread"));
         }
         return future;
     }
 
     private boolean submitMigration(CommandType type, IOSessionImpl session, IOWorkerImpl otherWorker, CompletableFuture<Void> future) {
         synchronized (pendingCommands) {
-            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateMigration, type, otherWorker, session, future, commandsRetryStrategy)) {
+            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateMigration, type, otherWorker, session, future, commandsRetryStrategy())) {
                 return false;
             }
         }
@@ -281,12 +293,16 @@ class IOWorkerImpl implements IOWorker {
 
     private boolean submitRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
         synchronized (pendingCommands) {
-            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateRegistration, clientSession, socket, baseBuilder, commandsRetryStrategy)) {
+            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateRegistration, clientSession, socket, baseBuilder, commandsRetryStrategy())) {
                 return false;
             }
         }
         signalPendingCommands();
         return true;
+    }
+
+    private RetryStrategy commandsRetryStrategy() {
+        return Thread.currentThread() == ioWorkerThread ? NO_RETRY : commandsRetryStrategy;
     }
 
     private void signalPendingCommands() {
@@ -390,6 +406,15 @@ class IOWorkerImpl implements IOWorker {
         ioSessionRingBufferStates.put(session, new RingBufferStates());
         computeTrackReceiveTime();
         log.info("IOSession {} has been attached to IOWorker {}", session.getId(), this.getName());
+        session.onAttached();
+    }
+
+    /**
+     * Moves a session whose handshake just completed here to the worker it was accepted for. Never waits: called on
+     * this worker's IO thread, so a full command queue refuses and the session stays here.
+     */
+    boolean handOff(IOSessionImpl session, IOWorkerImpl target) {
+        return submitMigration(CommandType.DETACH, session, target, new CompletableFuture<>());
     }
 
     private void runLoop() {
@@ -400,7 +425,8 @@ class IOWorkerImpl implements IOWorker {
             // also on an Error: a session's disconnection only ever runs on its IO thread, so this is its last chance
             commandsClosed = true;
             synchronized (pendingCommands) {
-                // waits out a producer still offering: its command is queued, or it has seen the queue closed
+                // a barrier: a producer still inside has either queued its command or seen the queue closed. The drain below
+                // stays outside, as returning a session to its origin takes that worker's lock
             }
             while (pendingCommands.poll(this::onIOWorkerCommandAfterStop)) {
                 // drain
@@ -441,7 +467,7 @@ class IOWorkerImpl implements IOWorker {
                 }
             }
             if (trackReceiveTime) {
-                localReceiveTime = ZERO;
+                localReceiveTime = RECEIVE_TIME_NOT_TAKEN;
             }
             if (pendingHandshakesCount > 0) {
                 // a peer that connects and then says nothing produces no readiness events, so a handshake left
@@ -500,7 +526,7 @@ class IOWorkerImpl implements IOWorker {
     }
 
     private void onSelectionKey(SelectionKey key) {
-        if (trackReceiveTime && localReceiveTime == ZERO) {
+        if (trackReceiveTime && localReceiveTime == RECEIVE_TIME_NOT_TAKEN) {
             localReceiveTime = System.nanoTime();
         }
         if (!key.isValid()) {
@@ -571,11 +597,17 @@ class IOWorkerImpl implements IOWorker {
         SocketChannel socket = serverSocketChannel.accept();
         ServerBuilder serverBuilder = (ServerBuilder) key.attachment();
         IOWorker target = serverBuilder.getIoWorkersGroup().getNext(socket);
-        // register on the accepting worker, then hand the session off through the existing detach/attach migration
-        // if the session group routes it elsewhere: a selector can only be registered from the thread owning it
-        IOSessionImpl ioSession = registerInternal(false, socket, serverBuilder);
-        if (ioSession != null && target != this) {
-            migrateIOSession(ioSession, target);
+        if (target != this && serverBuilder.getServerSSLSettings() != null && serverBuilder.getAcceptorIoWorkerGroup() != null) {
+            // a dedicated acceptor runs the handshake and the session moves once it is done, sparing the target's
+            // other sessions; without one, this worker serves sessions too and the handshake belongs on the target
+            registerInternal(false, socket, serverBuilder, (IOWorkerImpl) target);
+        } else {
+            try {
+                target.register(false, socket, serverBuilder);
+            } catch (IOException e) {
+                log.error("Failed to register accepted socket {} on {}", socket, target.getName(), e);
+                closeQuietly(socket);
+            }
         }
         acceptCpuTimeInNanos += System.nanoTime() - startTime;
     }
@@ -625,10 +657,18 @@ class IOWorkerImpl implements IOWorker {
         pendingHandshakesCount++;
     }
 
-    private IOSessionImpl registerInternal(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) throws IOException {
+    private void registerInternal(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) throws IOException {
+        registerInternal(clientSession, socket, baseBuilder, null);
+    }
+
+    private void registerInternal(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder,
+                                  IOWorkerImpl handOffTarget) throws IOException {
         log.info("Registering socket {} connected to {}", socket, name);
         socket.configureBlocking(false);
         IOSessionImpl ioSession = createIOSession(clientSession, socket, baseBuilder);
+        if (handOffTarget != null) {
+            ((SecureIOSession) ioSession).handOffAfterHandshake(handOffTarget);
+        }
         if (enabledStatistics) {
             ioSession.onIOWorkerStatsEnabled(true);
         }
@@ -637,7 +677,7 @@ class IOWorkerImpl implements IOWorker {
                     this::onIOSessionWritesBufferFull, ioWorkerThread, this)) {
                 if (!ioSession.isStarted()) {
                     // stopped from inside start, by a failed TLS handshake or a stop() in onConnected: already cleaned up
-                    return null;
+                    return;
                 }
                 registeredSessions.add(ioSession);
                 ioSessionRingBufferStates.put(ioSession, new RingBufferStates());
@@ -645,7 +685,6 @@ class IOWorkerImpl implements IOWorker {
                 if (ioSession instanceof SecureIOSession && ((SecureIOSession) ioSession).isHandshaking()) {
                     onHandshakeStarted();
                 }
-                return ioSession;
             } else {
                 ioSession.getIoEventsListener().onSessionRejected(ioSession);
                 ioSession.closeNeverConnected();
@@ -658,7 +697,6 @@ class IOWorkerImpl implements IOWorker {
             }
             ioSession.closeNeverConnected();
         }
-        return null;
     }
 
     private IOSessionImpl createIOSession(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {

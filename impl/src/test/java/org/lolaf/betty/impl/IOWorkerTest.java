@@ -37,6 +37,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -465,6 +467,49 @@ class IOWorkerTest {
         assertThat(worker.getRegisteredSessions()).containsExactly(session);
         writeToPeer("still served");
         await().atMost(Duration.ofSeconds(10)).until(() -> listener.bytesRead.get() == "still served".length());
+    }
+
+    @Test
+    void migratingMoreSessionsThanTheCommandQueueHoldsFromTheirOwnIOThreadRefusesInsteadOfHanging() throws Exception {
+        int migrations = 17;
+        startWorker("crowded-worker");
+        IOWorkerImpl target = new IOWorkerImpl("crowded-target", IOWorkersGroupSettings.builder().id("crowded-target").build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder().build()).start();
+        List<SocketChannel> sockets = new ArrayList<>();
+        try {
+            for (int i = 0; i < migrations; i++) {
+                sockets.add(SocketChannel.open(peerListener.getLocalAddress()));
+                sockets.add(peerListener.accept());
+                worker.register(true, sockets.get(sockets.size() - 2), ClientBuilder.builder().id("crowded-" + i).ioEventsListener(new CountingListener()).build());
+            }
+            await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == migrations);
+            List<IOSession> toMigrate = worker.getRegisteredSessions();
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            CountDownLatch submitted = new CountDownLatch(1);
+            registeredSocket = SocketChannel.open(peerListener.getLocalAddress());
+            peer = peerListener.accept();
+            worker.register(true, registeredSocket, ClientBuilder.builder().id("migrating-trigger").ioEventsListener(new CountingListener() {
+                @Override
+                public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
+                    super.onRead(session, message, localReceiveTimeInNanos);
+                    toMigrate.forEach(migrating -> futures.add(worker.migrateIOSession(migrating, target)));
+                    submitted.countDown();
+                }
+            }).build());
+            await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == migrations + 1);
+
+            writeToPeer("migrate them all");
+
+            assertThat(submitted.await(10, TimeUnit.SECONDS)).as("the IO thread did not wait for itself").isTrue();
+            assertThat(futures.get(migrations - 1)).isCompletedExceptionally();
+            CompletableFuture.allOf(futures.subList(0, migrations - 1).toArray(new CompletableFuture[0])).get(10, TimeUnit.SECONDS);
+            assertThat(target.getRegisteredSessionsCount()).isEqualTo(migrations - 1);
+        } finally {
+            target.stop(Deadline.immediate());
+            for (SocketChannel socket : sockets) {
+                close(socket);
+            }
+        }
     }
 
     @Test
