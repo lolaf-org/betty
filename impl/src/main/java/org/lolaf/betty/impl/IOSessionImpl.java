@@ -638,6 +638,10 @@ class IOSessionImpl implements IOSession {
         }
     }
 
+    final boolean isDisconnectionAfterReadRequested() {
+        return disconnectionAfterRead;
+    }
+
     void onOperationReadInternal(long localReceiveTimeInNanos) throws IOException {
         if (ioWorkerStatsEnabled) {
             long localReadStartTime = activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_READ);

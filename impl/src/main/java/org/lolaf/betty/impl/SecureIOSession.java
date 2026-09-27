@@ -425,6 +425,11 @@ class SecureIOSession extends IOSessionImpl {
                         // is nothing to hand up when that happens
                         processIOEventsListenerOnRead(decodedBuffer.flip(), localReceiveTimeInNanos);
                     }
+                    // the listener stopped the session: the records left belong to the connection closing after this read
+                    if (isDisconnectionAfterReadRequested()) {
+                        ioStats.onSocketRead(this, readenBytes, localReadStartTime);
+                        return;
+                    }
                     // we managed to fully read the input buffer, clear it and return
                     if (!readBuffer.hasRemaining()) {
                         readBuffer.clear();

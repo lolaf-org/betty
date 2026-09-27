@@ -436,42 +436,7 @@ class SSLTest extends AbstractTest {
             ByteBuffer inbound = ByteBuffer.allocate(engine.getSession().getPacketBufferSize()).flip();
             ByteBuffer decoded = ByteBuffer.allocate(engine.getSession().getApplicationBufferSize());
 
-            // everything up to, but not including, the flight that completes the handshake. FINISHED is reported on
-            // the result of the wrap that produces that flight and never by the engine afterwards, which is already
-            // NOT_HANDSHAKING by then, so the result is what the buffer is held back on
-            boolean finalFlightHeld = false;
-            while (!finalFlightHeld) {
-                switch (engine.getHandshakeStatus()) {
-                    case NEED_TASK:
-                        Runnable task;
-                        while ((task = engine.getDelegatedTask()) != null) {
-                            task.run();
-                        }
-                        break;
-                    case NEED_WRAP:
-                        outbound.clear();
-                        finalFlightHeld = engine.wrap(ByteBuffer.allocate(0), outbound)
-                                .getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED;
-                        if (!finalFlightHeld) {
-                            socket.write(outbound.flip());
-                        }
-                        break;
-                    case NEED_UNWRAP:
-                        // one record per turn of the outer loop, reading only when the buffer cannot feed the engine.
-                        // Anything still in it stays there: the engine leaves the rest of a flight behind whenever it
-                        // needs a task run or a wrap sent, and those bytes are gone from the socket already
-                        if (!inbound.hasRemaining()) {
-                            fill(socket, inbound);
-                        }
-                        decoded.clear();
-                        if (engine.unwrap(inbound, decoded).getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
-                            fill(socket, inbound);
-                        }
-                        break;
-                    default:
-                        throw new IllegalStateException("Unexpected handshake status " + engine.getHandshakeStatus());
-                }
-            }
+            holdTheFinalHandshakeFlight(socket, engine, outbound, inbound, decoded);
 
             // the application records join the flight still sitting in the buffer, and all of it leaves in one write
             ByteBuffer application = ByteBuffer.wrap(payload);
@@ -482,6 +447,91 @@ class SSLTest extends AbstractTest {
 
             await().untilAtomic(receivedBytes, Matchers.equalTo(payload.length));
             verify(serverIoEventsListener, never()).onError(any(IOSession.class), any());
+        }
+    }
+
+    /**
+     * A listener that stops its session from {@code onRead} is not handed the records that arrived in the same read:
+     * they belong to the connection closing once that {@code onRead} returns. Written in one go after the handshake so
+     * that they do arrive in one read.
+     */
+    @Test
+    void testRecordsReadWithTheOneThatStoppedTheSessionDoNotReachOnRead() throws Exception {
+        setupTestEnv(getTestClientBuilder(),
+                getTestServerBuilder().toBuilder().serverSSLSettings(ServerSSLSettings.builder()
+                        .sslContext(getServerSSLContext()).build()).build());
+        server.start();
+        AtomicInteger onReadCalls = new AtomicInteger();
+        doAnswer(invocation -> {
+            onReadCalls.incrementAndGet();
+            ByteBuffer read = invocation.getArgument(1);
+            read.position(read.limit());
+            invocation.getArgument(0, IOSession.class).stop(Deadline.immediate());
+            return null;
+        }).when(serverIoEventsListener).onRead(any(IOSession.class), any(ByteBuffer.class), anyLong());
+
+        try (SocketChannel socket = SocketChannel.open(new InetSocketAddress("localhost", port))) {
+            SSLEngine engine = getClientSSLContext().createSSLEngine("localhost", port);
+            engine.setUseClientMode(true);
+            engine.beginHandshake();
+            ByteBuffer outbound = ByteBuffer.allocate(64 * 1024);
+            ByteBuffer inbound = ByteBuffer.allocate(engine.getSession().getPacketBufferSize()).flip();
+            ByteBuffer decoded = ByteBuffer.allocate(engine.getSession().getApplicationBufferSize());
+            holdTheFinalHandshakeFlight(socket, engine, outbound, inbound, decoded);
+            socket.write(outbound.flip());
+            await().untilAsserted(() -> verify(serverIoEventsListener).onConnected(any(IOSession.class)));
+
+            outbound.clear();
+            for (int record = 0; record < 3; record++) {
+                assertThat(engine.wrap(ByteBuffer.wrap(new byte[100]), outbound).getStatus()).isEqualTo(SSLEngineResult.Status.OK);
+            }
+            socket.write(outbound.flip());
+
+            await().untilAsserted(() -> verify(serverIoEventsListener).onDisconnected(any(IOSession.class)));
+        }
+        assertThat(onReadCalls).hasValue(1);
+    }
+
+    /**
+     * Drives a client engine by hand up to, but not including, the flight that completes the handshake, which is left
+     * in {@code outbound} for the caller to write as it needs.
+     */
+    private static void holdTheFinalHandshakeFlight(SocketChannel socket, SSLEngine engine, ByteBuffer outbound,
+                                                    ByteBuffer inbound, ByteBuffer decoded) throws IOException {
+        // FINISHED is reported on the result of the wrap that produces that flight and never by the engine afterwards,
+        // which is already NOT_HANDSHAKING by then, so the result is what the buffer is held back on
+        boolean finalFlightHeld = false;
+        while (!finalFlightHeld) {
+            switch (engine.getHandshakeStatus()) {
+                case NEED_TASK:
+                    Runnable task;
+                    while ((task = engine.getDelegatedTask()) != null) {
+                        task.run();
+                    }
+                    break;
+                case NEED_WRAP:
+                    outbound.clear();
+                    finalFlightHeld = engine.wrap(ByteBuffer.allocate(0), outbound)
+                            .getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED;
+                    if (!finalFlightHeld) {
+                        socket.write(outbound.flip());
+                    }
+                    break;
+                case NEED_UNWRAP:
+                    // one record per turn of the outer loop, reading only when the buffer cannot feed the engine.
+                    // Anything still in it stays there: the engine leaves the rest of a flight behind whenever it
+                    // needs a task run or a wrap sent, and those bytes are gone from the socket already
+                    if (!inbound.hasRemaining()) {
+                        fill(socket, inbound);
+                    }
+                    decoded.clear();
+                    if (engine.unwrap(inbound, decoded).getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
+                        fill(socket, inbound);
+                    }
+                    break;
+                default:
+                    throw new IllegalStateException("Unexpected handshake status " + engine.getHandshakeStatus());
+            }
         }
     }
 

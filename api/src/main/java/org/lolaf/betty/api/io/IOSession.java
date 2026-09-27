@@ -130,7 +130,8 @@ public interface IOSession extends IOWriter {
      * open until that thread gets to it. Called from an IO thread, it does not wait.
      * <p>
      * Called from {@link IOEventsListener#onRead}, the connection closes once {@code onRead} returns: the rest of that
-     * callback still runs on an open session, and {@link IOEventsListener#onDisconnected} is never called from inside it.
+     * callback still runs on an open session, {@link IOEventsListener#onDisconnected} is never called from inside it,
+     * and {@code onRead} is not called again, not even for TLS records that arrived in the same read.
      *
      * @param stopDeadline time to wait for flushing all message to be sent before closing the session
      */

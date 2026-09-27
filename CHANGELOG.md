@@ -25,7 +25,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
   running on it, and a session rejected by the `RemoteSessionsFilter` no longer receives `onShutdown`.
 - **Stopping a session from its own `onRead` now waits for `onRead` to finish.** The connection used to close right
   away, so `onDisconnected` was called while `onRead` was still running, and the end of `onRead` worked on a closed
-  session. The connection now closes as soon as `onRead` returns.
+  session. The connection now closes as soon as `onRead` returns, and `onRead` is not called again: over TLS, data
+  that arrived in the same read used to be handed to it after the stop.
 - **A `send` from another thread no longer blocks forever on a disconnected session.** When the send queue was
   full as the session closed, the call waited forever; it now fails like a send to a stopped session.
 - **`onConnected` always runs on the session's IO thread.** A socket passed to `IOWorker.register` from another thread
