@@ -9,7 +9,7 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
-## [0.9.2] - 2026-09-26
+## [0.9.2] - 2026-09-27
 
 ### Added
 
@@ -21,7 +21,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
   thread to a disconnected session, or one whose IO worker is gone, is handed to its callback with an `EOFException`.
   Once the queue was full, such a call used to block forever.
 - **`stop()` on a session is more reliable.** It no longer closes the connection in an unsafe way after a short timeout;
-  it waits, up to 30 seconds, until the session is fully closed. Stopping an `IOWorker` now also closes the sessions still
+  it waits, up to 30 seconds, until the session is fully closed. Stopping an `IOWorker` now also closes the sessions
+  still
   running on it, and a session rejected by the `RemoteSessionsFilter` no longer receives `onShutdown`.
 - **Stopping a session from its own `onRead` now waits for `onRead` to finish.** The connection used to close right
   away, so `onDisconnected` was called while `onRead` was still running, and the end of `onRead` worked on a closed
