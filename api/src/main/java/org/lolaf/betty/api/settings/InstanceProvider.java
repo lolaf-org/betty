@@ -38,8 +38,9 @@ public interface InstanceProvider<T> {
      *                                          a dependency on the api module alone
      */
     static <I, F extends Factory<I, S>, S> I getSpiInstance(S settings, Class<F> spiClass) {
-        return ServiceLoader.load(spiClass)
-                .findFirst().orElseThrow()
+        return ServiceLoader.load(spiClass).findFirst()
+                .or(() -> ServiceLoader.load(spiClass, spiClass.getClassLoader()).findFirst())
+                .orElseThrow()
                 .newInstance(settings);
     }
 
