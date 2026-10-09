@@ -323,9 +323,15 @@
                 <version>${license-maven-plugin.version}</version>
                 <inherited>false</inherited>
                 <configuration>
+                    <!-- without it, a check run from the parent alone skips every module directory -->
+                    <aggregate>true</aggregate>
                     <licenseSets>
                         <licenseSet>
                             <header>${project.basedir}/HEADER.txt</header>
+                            <properties>
+                                <year>2024-2026</year>
+                                <owner>Lolaf.org</owner>
+                            </properties>
                             <excludes>
                                 <exclude>**/LICENSE.txt</exclude>
                                 <exclude>**/*.txt</exclude>
@@ -334,6 +340,7 @@
                                 <exclude>**/*.sh</exclude>
                                 <exclude>**/*.json</exclude>
                                 <exclude>**/*.md</exclude>
+                                <exclude>**/*.html</exclude>
                                 <exclude>**/mvnw</exclude>
                                 <exclude>**/.mvn/**</exclude>
                                 <exclude>**/pom.xml</exclude>
