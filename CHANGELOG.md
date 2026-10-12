@@ -9,7 +9,7 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
-## [0.9.3] - 2026-10-27
+## [0.9.3] - 2026-10-12
 
 ### Added
 
