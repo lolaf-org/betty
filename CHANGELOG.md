@@ -11,6 +11,13 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ## [0.9.3] - 2026-10-27
 
+### Added
+
+- **A message builder is told when its message is queued instead of written at once.**
+  `IOWriter.ByteBufferBuilder.onQueued()` is called, before `send` returns, when a builder handed over on the IO
+  thread has to wait, behind a write still going out or on a paused session. A protocol can then copy what the builder
+  needs and free its own objects right away. It does nothing by default.
+
 ### Fixed
 
 - **`InstanceProvider.getSpiInstance` finds the implementation from any thread.** It looked only through the calling

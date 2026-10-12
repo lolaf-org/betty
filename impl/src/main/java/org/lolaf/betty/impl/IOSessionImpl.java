@@ -1424,6 +1424,7 @@ class IOSessionImpl implements IOSession {
                     writeWatermarkState.onEnqueued(byteBufferBuilder.getEstimatedByteBufferSize());
                 }
                 if (offerOrDrainAndRetry(translateSendWithByteBufferBuilder, byteBufferBuilder, messageSentCallback, messageSendingContext)) {
+                    notifyQueued(byteBufferBuilder);
                     registerWriteOperationIfNeeded();
                     return;
                 }
@@ -1465,6 +1466,14 @@ class IOSessionImpl implements IOSession {
 
         private <C> boolean sendInIOThread(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer, CompletableFuture<?> writeFuture) {
             return pendingWrite.isFullyWritten() && ioThreadSender.send(message, messageSentCallback, messageSendingContext, writeFuture, ioBufferPoolByteBuffer);
+        }
+
+        private void notifyQueued(ByteBufferBuilder byteBufferBuilder) {
+            try {
+                byteBufferBuilder.onQueued();
+            } catch (Exception ex) {
+                log.warn("Failed to notify a queued ByteBufferBuilder on IO session {}", id, ex);
+            }
         }
 
         private <A, B> boolean offerOrDrainAndRetry(RingBuffer.EventTranslatorTwoArg<IOThreadRequest, A, B> translator,
