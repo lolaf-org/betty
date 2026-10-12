@@ -49,3 +49,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: "org.slf4j:*"
+      # 3.10 stages resolver files into the Central bundle, which the Portal rejects
+      - dependency-name: "org.apache.maven:apache-maven"
+        versions: [">= 3.10.0"]
