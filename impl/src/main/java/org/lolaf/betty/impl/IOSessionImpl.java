@@ -691,7 +691,7 @@ class IOSessionImpl implements IOSession {
     }
 
     private void processPendingRequests(int maxWritableBytesCount) throws IOException {
-        if (pendingWrite.isNotFullyWritten()) {
+        if (isPendingWriteNotFullyWritten()) {
             maxWritableBytesCount -= resumePendingWrite(0L);
         }
         // nothing may be polled while a message is half out, whoever left it there: a request taken from the ring now
@@ -711,7 +711,7 @@ class IOSessionImpl implements IOSession {
     }
 
     private void processPendingRequestsWithStats(int maxWritableBytesCount) throws IOException {
-        if (pendingWrite.isNotFullyWritten()) {
+        if (isPendingWriteNotFullyWritten()) {
             long resumeStartTime = activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE);
             maxWritableBytesCount -= resumePendingWrite(resumeStartTime);
             cpuTimeStats.writeCpuTimeInNanos += activeIOStats.getTimeInNanos(IOStats.Operation.IO_SOCKET_WRITE) - resumeStartTime;
@@ -737,12 +737,12 @@ class IOSessionImpl implements IOSession {
     }
 
     private boolean canContinueProcessingIOThreadRequests(int maxWritableBytesCount) {
-        return pendingWrite.isFullyWritten() && maxWritableBytesCount >= 0;
+        return isPendingWriteFullyWritten() && maxWritableBytesCount >= 0;
     }
 
     private void clearWriteInterestUnlessRequeued() {
         selectionKey.interestOpsAnd(~SelectionKey.OP_WRITE);
-        if (ioThreadRequests.isNotEmpty() || pendingWrite.isNotFullyWritten()) {
+        if (ioThreadRequests.isNotEmpty() || isPendingWriteNotFullyWritten()) {
             selectionKey.interestOpsOr(SelectionKey.OP_WRITE);
         }
     }
@@ -759,7 +759,7 @@ class IOSessionImpl implements IOSession {
             return writeBufferOut(localIOThreadRequest, false, localWriteStartTimeInNanos);
         } finally {
             localIOThreadRequest.byteBufferBuilder = null;
-            if (bufferOut != null && bufferOut.hasRemaining()) {
+            if (bufferOut != null && !isFullyWritten(bufferOut)) {
                 pendingWrite.transferFromPoll(localIOThreadRequest);
             } else {
                 if (bufferOut != null && bbb.isPooledByteBuffer()) {
@@ -777,7 +777,7 @@ class IOSessionImpl implements IOSession {
             localIOThreadRequest.watermarkEnqueuedBytes = bufferOut.position();
             return writeBufferOut(localIOThreadRequest, false, localWriteStartTime);
         } finally {
-            if (bufferOut.hasRemaining()) {
+            if (!isFullyWritten(bufferOut)) {
                 pendingWrite.transferFromPoll(localIOThreadRequest);
             } else {
                 if (localIOThreadRequest.ioBufferPoolByteBuffer) {
@@ -795,7 +795,7 @@ class IOSessionImpl implements IOSession {
         try {
             return writeBufferOut(pendingWrite, true, localWriteStartTime);
         } finally {
-            if (!bufferOut.hasRemaining()) {
+            if (isFullyWritten(bufferOut)) {
                 if (pooledBuffer) {
                     ioBufferPool.returnByteBuffer(bufferOut);
                 }
@@ -826,7 +826,7 @@ class IOSessionImpl implements IOSession {
             throw ex;
         }
         activeIOStats.onSocketWrite(this, bytesWritten, localWriteStartTime);
-        boolean complete = !bufferOut.hasRemaining();
+        boolean complete = isFullyWritten(bufferOut);
         if (writeWatermarkState.isEnabled()) {
             int consumed = bufferOut.position() - consumedBefore;
             // a builder's estimate is what was counted in, and it is not always what it built: settle the difference
@@ -905,6 +905,26 @@ class IOSessionImpl implements IOSession {
         }
     }
 
+    /**
+     * Whether a write took bytes from its message that have yet to reach the socket, as TLS does with the part of a
+     * record the socket refused: until they leave, that message is not sent, however empty its buffer looks.
+     */
+    boolean hasUnflushedWrite() {
+        return false;
+    }
+
+    private boolean isFullyWritten(ByteBuffer bufferOut) {
+        return !bufferOut.hasRemaining() && !hasUnflushedWrite();
+    }
+
+    private boolean isPendingWriteNotFullyWritten() {
+        return pendingWrite.byteBuffer != null && !isFullyWritten(pendingWrite.byteBuffer);
+    }
+
+    private boolean isPendingWriteFullyWritten() {
+        return !isPendingWriteNotFullyWritten();
+    }
+
     protected int writeToSocket(ByteBuffer bufferOut) throws IOException {
         bufferOut.flip();
         return continueWriteToSocket(bufferOut);
@@ -922,7 +942,7 @@ class IOSessionImpl implements IOSession {
 
     private boolean hasUnsentMessages() {
         // an empty ring is not the end of the writing: the last message can be half out, held as the pending write
-        return ioThreadRequests.isNotEmpty() || pendingWrite.isNotFullyWritten();
+        return ioThreadRequests.isNotEmpty() || isPendingWriteNotFullyWritten();
     }
 
     /**
@@ -943,7 +963,7 @@ class IOSessionImpl implements IOSession {
                 log.info("Failed to close socket on IOSession {}", id, e);
             }
         }
-        if (pendingWrite.isNotFullyWritten()) {
+        if (isPendingWriteNotFullyWritten()) {
             safelyProcessCallbackOnDisconnection(pendingWrite);
             pendingWrite.cleanRegularIOWriteOperation();
         }
@@ -1086,14 +1106,6 @@ class IOSessionImpl implements IOSession {
         void translate(Runnable task, BiConsumer<Runnable, Exception> taskCallback) {
             this.task = task;
             this.taskCallback = taskCallback;
-        }
-
-        boolean isNotFullyWritten() {
-            return byteBuffer != null && byteBuffer.hasRemaining();
-        }
-
-        boolean isFullyWritten() {
-            return byteBuffer == null || !byteBuffer.hasRemaining();
         }
 
         boolean isIOWriteOperation() {
@@ -1411,7 +1423,7 @@ class IOSessionImpl implements IOSession {
             if (Thread.currentThread() == ioWorkerThread) {
                 // !paused as well: this branch builds the message before offering it, and a declined send would have
                 // nowhere to put one the builder can no longer be asked for a second time
-                if (!orderedWrites && !paused && pendingWrite.isFullyWritten()) {
+                if (!orderedWrites && !paused && isPendingWriteFullyWritten()) {
                     try {
                         ioThreadSender.send(byteBufferBuilder.build(), messageSentCallback, messageSendingContext, null, byteBufferBuilder.isPooledByteBuffer());
                     } catch (IOException ex) {
@@ -1465,7 +1477,7 @@ class IOSessionImpl implements IOSession {
         }
 
         private <C> boolean sendInIOThread(ByteBuffer message, C messageSendingContext, MessageSentCallback<C> messageSentCallback, boolean ioBufferPoolByteBuffer, CompletableFuture<?> writeFuture) {
-            return pendingWrite.isFullyWritten() && ioThreadSender.send(message, messageSentCallback, messageSendingContext, writeFuture, ioBufferPoolByteBuffer);
+            return isPendingWriteFullyWritten() && ioThreadSender.send(message, messageSentCallback, messageSendingContext, writeFuture, ioBufferPoolByteBuffer);
         }
 
         private void notifyQueued(ByteBufferBuilder byteBufferBuilder) {
@@ -1554,7 +1566,7 @@ class IOSessionImpl implements IOSession {
                 // writeBufferOut has told the caller already: send() is not declared to throw, so unlike the write
                 // cycle this one has nowhere to rethrow it to, and the cleanup below is the whole of what is left
             } finally {
-                if (message.hasRemaining()) {
+                if (!isFullyWritten(message)) {
                     registerWriteOperationIfNeeded();
                 } else {
                     if (ioBufferPoolByteBuffer) {

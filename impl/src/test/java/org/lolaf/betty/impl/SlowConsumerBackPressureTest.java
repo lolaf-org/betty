@@ -24,6 +24,7 @@ import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.io.ReleasableMessageSendingContext;
 import org.lolaf.betty.api.settings.IOBufferPoolSettings;
 import org.lolaf.betty.api.settings.IOSettings;
+import org.lolaf.betty.api.stats.IOStats;
 import org.lolaf.ringos.Deadline;
 
 import java.net.SocketOption;
@@ -44,6 +45,16 @@ class SlowConsumerBackPressureTest extends AbstractTest {
     private static final int CHUNK_SIZE = 16 * 1024;
 
     private static final int CHUNKS = 32;
+
+    /**
+     * Small enough for a single TLS record.
+     */
+    private static final int SMALL_CHUNK_SIZE = 4 * 1024;
+
+    /**
+     * Far more than the socket buffers hold, so a send is refused well before.
+     */
+    private static final int MAX_SMALL_CHUNKS = 1024;
 
     private static final int WRITE_HIGH_WATERMARK = 256 * 1024;
 
@@ -76,7 +87,10 @@ class SlowConsumerBackPressureTest extends AbstractTest {
     }
 
     private static ByteBuffer chunk(IOSession session, AtomicLong sequence, int size) {
-        ByteBuffer buffer = session.borrow(size);
+        return fillWithSequence(session.borrow(size), sequence);
+    }
+
+    private static ByteBuffer fillWithSequence(ByteBuffer buffer, AtomicLong sequence) {
         while (buffer.remaining() >= Long.BYTES) {
             buffer.putLong(sequence.getAndIncrement());
         }
@@ -171,6 +185,54 @@ class SlowConsumerBackPressureTest extends AbstractTest {
 
     @ParameterizedTest
     @MethodSource("getTestParams")
+    void aMessageWhoseLastBytesTheSocketRefusedIsNotReportedSentAndStillLeaves(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
+        SocketWriteRecorder serverStats = new SocketWriteRecorder();
+        SequenceCheckingListener clientListener = new SequenceCheckingListener();
+        setupTestEnvAndWaitForConnections(
+                clientBuilder.toBuilder().ioEventsListener(clientListener).ioSettings(consumerSettings()).build(),
+                serverBuilder.toBuilder().ioEventsListener(new TestIOEventsListener()).ioSettings(producerSettings())
+                        .ioStatsProvider(session -> serverStats).build());
+        server.enableIOStats(true);
+
+        clientIOsession.pause(Deadline.immediate());
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicInteger messagesSent = new AtomicInteger();
+        AtomicBoolean lastMessageReportedSent = new AtomicBoolean();
+        AtomicBoolean sendingDone = new AtomicBoolean();
+        // each message fits in one TLS record, and sending stops at the first one the socket did not take whole: with
+        // nothing sent after it, only its own write interest can ever finish it
+        serverClientIOsession.processTask(() -> {
+            AtomicLong sequence = new AtomicLong();
+            int wholeMessageWrite = -1;
+            int lastWrite;
+            do {
+                int callbacksBefore = callbacks.get();
+                serverClientIOsession.send(fillWithSequence(ByteBuffer.allocate(SMALL_CHUNK_SIZE), sequence), null,
+                        (message, sendingError, sendingContext) -> callbacks.incrementAndGet(), false);
+                messagesSent.incrementAndGet();
+                lastMessageReportedSent.set(callbacks.get() > callbacksBefore);
+                lastWrite = serverStats.getLastWrite();
+                if (wholeMessageWrite < 0) {
+                    wholeMessageWrite = lastWrite;
+                }
+            } while (lastWrite == wholeMessageWrite && messagesSent.get() < MAX_SMALL_CHUNKS);
+            sendingDone.set(true);
+        });
+
+        await().untilAsserted(() -> assertThat(sendingDone).isTrue());
+        assertThat(messagesSent).hasValueLessThan(MAX_SMALL_CHUNKS);
+        assertThat(lastMessageReportedSent).isFalse();
+
+        clientIOsession.resume();
+
+        await().untilAsserted(() -> assertThat(clientListener.getBytesRead())
+                .hasValue((long) messagesSent.get() * SMALL_CHUNK_SIZE));
+        await().untilAsserted(() -> assertThat(callbacks).hasValue(messagesSent.get()));
+        assertThat(clientListener.getCorruption()).isNull();
+    }
+
+    @ParameterizedTest
+    @MethodSource("getTestParams")
     void consumerThatStopsReadingThrottlesTheWriterAndKeepsTheSession(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
         WatermarkListener serverListener = new WatermarkListener();
         SequenceCheckingListener clientListener = new SequenceCheckingListener();
@@ -191,6 +253,22 @@ class SlowConsumerBackPressureTest extends AbstractTest {
         assertThat(clientListener.getCorruption()).isNull();
         await().untilAsserted(() -> assertThat(serverListener.getLowWatermarkEvents()).hasPositiveValue());
         assertThat(serverClientIOsession.isStarted()).isTrue();
+    }
+
+    private static final class SocketWriteRecorder implements IOStats {
+
+        @Getter
+        private volatile int lastWrite;
+
+        @Override
+        public long getTimeInNanos(Operation operation) {
+            return System.nanoTime();
+        }
+
+        @Override
+        public void onSocketWrite(IOSession ioSession, int writtenBytes, long localWriteStartTimeInNanos) {
+            lastWrite = writtenBytes;
+        }
     }
 
     private static final class CountingContext implements ReleasableMessageSendingContext {

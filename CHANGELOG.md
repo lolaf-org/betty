@@ -20,6 +20,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ### Fixed
 
+- **A TLS message no longer stalls when the socket is full.** Its end could stay unsent until the next send, while
+  the message was already reported sent.
 - **`InstanceProvider.getSpiInstance` finds the implementation from any thread.** It looked only through the calling
   thread's context class loader, so a thread that cannot see the application failed with a `NoSuchElementException`
 
