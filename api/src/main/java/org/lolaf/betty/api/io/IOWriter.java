@@ -30,6 +30,10 @@ import java.util.concurrent.CompletableFuture;
  * {@link IOSettings#isOrderedWrites()} queues those sends as well, which gives the session one order whichever thread
  * writes to it, for a ring round trip per message.
  * Methods implementations are lock free by design and thread safe
+ * <p>
+ * <b>A ByteBuffer is sent unflipped</b>: filled up to its position, which betty flips before writing, so the bytes
+ * from index 0 to the position go out. A buffer flipped by the caller has its position at 0, and is sent as nothing,
+ * without an error.
  */
 public interface IOWriter {
 
@@ -37,7 +41,8 @@ public interface IOWriter {
      * Borrows a ByteBuffer from the bytes buffer pool typically for write operation.
      *
      * @param capacity the capacity of the buffer.
-     * @return a ByteBuffer to work with
+     * @return a ByteBuffer to fill and send as it is, unflipped; after absolute puts, set its position to the end of
+     * what was written
      */
     ByteBuffer borrow(int capacity);
 
@@ -72,7 +77,7 @@ public interface IOWriter {
      * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
      * unless {@link IOSettings#isOrderedWrites()} is set.
      *
-     * @param message                the message to send
+     * @param message                the message, filled up to its position and not flipped
      * @param ioBufferPoolByteBuffer flag to indicate that the provided ByteBuffer is managed by the session
      *                               IOBuffer pool and has been retrieved by calling {@link #borrow(int)}, in such case
      *                               API user does NOT have to return the buffer to the pool after IO operation success or failure
@@ -86,7 +91,7 @@ public interface IOWriter {
      * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
      * unless {@link IOSettings#isOrderedWrites()} is set.
      *
-     * @param message                the message to send
+     * @param message                the message, filled up to its position and not flipped
      * @param messageSendingContext  a context object bound to the message sent or null if none required.
      *                               In case where the provided object is an instance of {@link ReleasableMessageSendingContext},
      *                               its release() method will be automatically called once the message has been fully sent
@@ -107,7 +112,7 @@ public interface IOWriter {
      * Called from the IO thread this writes straight to the socket, ahead of what other threads have queued,
      * unless {@link IOSettings#isOrderedWrites()} is set.
      *
-     * @param message                the message to send
+     * @param message                the message, filled up to its position and not flipped
      * @param messageSendingContext  a context object bound to the message sent or null if none required.
      *                               In case where the provided object is an instance of {@link ReleasableMessageSendingContext},
      *                               its release() method will be automatically called once the message has been fully sent

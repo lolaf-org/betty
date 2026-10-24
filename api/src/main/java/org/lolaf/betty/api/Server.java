@@ -61,7 +61,8 @@ public interface Server extends Startable<Server> {
     /**
      * Broadcast a message to connected sessions matching a given session tag
      *
-     * @param message the message to send, read once and then reusable by the caller
+     * @param message the bytes from index 0 to its limit, whatever its position, unlike a session's send; read once
+     *                and then reusable by the caller
      * @param tag     the tag a session must carry to be sent to
      * @return the number of sessions where the message has been sent
      */
@@ -71,7 +72,8 @@ public interface Server extends Startable<Server> {
      * Broadcast a message to connected sessions matching a multiple session tag,
      * each session must match all the tags provided to be selected for message broadcasting
      *
-     * @param message the message to send, read once and then reusable by the caller
+     * @param message the bytes from index 0 to its limit, whatever its position, unlike a session's send; read once
+     *                and then reusable by the caller
      * @param tags    the tags a session must all carry to be sent to; every session when null
      * @return the number of sessions where the message has been sent
      */
@@ -80,7 +82,8 @@ public interface Server extends Startable<Server> {
     /**
      * Broadcast a message to connected sessions matching a predicate for the IOSession
      *
-     * @param message       the message to send, read once and then reusable by the caller
+     * @param message       the bytes from index 0 to its limit, whatever its position, unlike a session's send;
+     *                      read once and then reusable by the caller
      * @param targetSession decides, per session, whether to send; called on the broadcasting thread
      * @return the number of sessions where the message has been sent
      */
