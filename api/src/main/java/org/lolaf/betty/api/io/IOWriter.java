@@ -47,9 +47,14 @@ public interface IOWriter {
     ByteBuffer borrow(int capacity);
 
     /**
-     * Return a ByteBuffer borrowed trough  {@link #borrow(int)} to the pool
+     * Gives back a buffer borrowed with {@link #borrow(int)} and not sent; a sent one goes back by itself.
+     * <p>
+     * <b>Call it on the session's IO thread</b>, through {@link IOSession#processTask(Runnable)} from any other: a
+     * session's own pool takes buffers back from one thread, the IO thread giving back those it wrote. Another thread
+     * doing so races it, and can lose a buffer or have one borrowed again while it is still being written. Only a pool
+     * a server shares between its sessions takes them back from any thread.
      *
-     * @param borrowed the byte buffer to return to the pool
+     * @param borrowed the buffer to give back
      */
     void unborrow(ByteBuffer borrowed);
 
