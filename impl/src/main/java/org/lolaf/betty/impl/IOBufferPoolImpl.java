@@ -22,10 +22,10 @@ import org.lolaf.betty.api.io.IOBufferPool;
 import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.settings.IOBufferPoolSettings;
 import org.lolaf.betty.api.stats.IOBufferPoolStats;
-import org.lolaf.ringos.unsafe.UnsafeOperations;
-import org.lolaf.ringos.unsafe.UnsafeOperationsApi;
 import org.lolaf.ringos.rb.RingBuffer;
 import org.lolaf.ringos.rb.RingBufferFactory;
+import org.lolaf.ringos.unsafe.UnsafeOperations;
+import org.lolaf.ringos.unsafe.UnsafeOperationsApi;
 
 import java.nio.ByteBuffer;
 import java.util.function.Consumer;
@@ -197,8 +197,9 @@ class IOBufferPoolImpl implements IOBufferPool {
         private final IntFunction<ByteBuffer> allocator;
         private final int ioBufferSize;
         private final RingBuffer<ByteBuffer> pool;
-        private final ByteBuffer memory;
+        private final int memoryBytes;
         private final int alignment;
+        private ByteBuffer memory;
         private int bufferPoolMiss;
         @Getter
         private int bufferPoolHit;
@@ -212,7 +213,8 @@ class IOBufferPoolImpl implements IOBufferPool {
             this.pool = getPool(threadingAccess, setting.getPoolSize());
             this.allocator = allocator;
             this.ioBufferSize = setting.getBufferSize();
-            this.memory = allocator.apply(setting.getBufferSize() * setting.getPoolSize() + alignment);
+            this.memoryBytes = setting.getBufferSize() * setting.getPoolSize() + alignment;
+            this.memory = allocator.apply(memoryBytes);
         }
 
         private static RingBuffer<ByteBuffer> getPool(IOBufferPoolSettings.MultiThreadingAccessMode threadingAccess, int poolSize) {
@@ -238,6 +240,9 @@ class IOBufferPoolImpl implements IOBufferPool {
             if (started) {
                 return;
             }
+            if (memory == null) {
+                memory = allocator.apply(memoryBytes);
+            }
             ByteBuffer alignedMemory = memory.isDirect() ? memory.alignedSlice(alignment) : memory;
             int pos = 0;
             while (!pool.isFull()) {
@@ -261,10 +266,15 @@ class IOBufferPoolImpl implements IOBufferPool {
             if (!started) {
                 return;
             }
-            if (!pool.isFull()) {
-                log.info("Potential IOBuffer leak, pool on stop is not full {}!={}", pool.getSize(), pool.getCapacity());
+            if (pool.isFull()) {
+                ByteBuffer released = memory;
+                UnsafeOperationsApi.ifAvailableDo(uo -> uo.invokeCleanerIfNeeded(released));
+            } else {
+                // a borrowed buffer may still be written: freed now, that write crashes the JVM; the GC frees it later
+                log.info("Potential IOBuffer leak, pool on stop is not full {}!={}, its memory is left to the garbage collector",
+                        pool.getSize(), pool.getCapacity());
             }
-            UnsafeOperationsApi.ifAvailableDo(uo -> uo.invokeCleanerIfNeeded(memory));
+            memory = null;
             pool.clear();
             resetHitMissCounters();
             started = false;

@@ -94,6 +94,60 @@ class IOBufferPoolImplTest {
         assertThat(ioBufferPool.getFreeBufferCount()).isEqualTo(zone.getPoolSize());
     }
 
+    /**
+     * Large enough for the allocator to unmap it when freed, so a write into freed memory crashes rather than passes.
+     */
+    private static IOBufferPoolImpl largeDirectPool() {
+        return new IOBufferPoolImpl(IOBufferPoolSettings.builder()
+                .zone(IOBufferPoolSettings.IOBufferPoolZone.builder().bufferSize(1 << 20).poolSize(4).build())
+                .build()).start(null);
+    }
+
+    @Test
+    void aBufferStillBorrowedWhenThePoolStopsCanStillBeWritten() {
+        IOBufferPoolImpl pool = largeDirectPool();
+        ByteBuffer borrowed = pool.borrowByteBuffer(1 << 20);
+
+        pool.stop();
+
+        for (int i = 0; i < borrowed.capacity(); i += Long.BYTES) {
+            borrowed.putLong(i, i);
+        }
+        assertThat(borrowed.getLong(borrowed.capacity() - Long.BYTES)).isEqualTo(borrowed.capacity() - Long.BYTES);
+    }
+
+    @Test
+    void aPoolStartedAgainNeverHandsOutTheMemoryOfABufferStillBorrowed() {
+        IOBufferPoolImpl pool = largeDirectPool();
+        ByteBuffer borrowed = pool.borrowByteBuffer(1 << 20);
+        borrowed.putLong(0, 42);
+        pool.stop();
+
+        pool.start(null);
+        for (int i = 0; i < 4; i++) {
+            pool.borrowByteBuffer(1 << 20).putLong(0, -1);
+        }
+
+        assertThat(borrowed.getLong(0)).isEqualTo(42);
+        pool.stop();
+    }
+
+    @Test
+    void aPoolStoppedWithEveryBufferBackAndStartedAgainHandsOutLiveMemory() {
+        IOBufferPoolImpl pool = largeDirectPool();
+        pool.stop();
+
+        pool.start(null);
+        ByteBuffer buffer = pool.borrowByteBuffer(1 << 20);
+        for (int i = 0; i < buffer.capacity(); i += Long.BYTES) {
+            buffer.putLong(i, i);
+        }
+
+        assertThat(buffer.getLong(buffer.capacity() - Long.BYTES)).isEqualTo(buffer.capacity() - Long.BYTES);
+        pool.returnByteBuffer(buffer);
+        pool.stop();
+    }
+
     @Test
     void testNewByteBuffer() {
         ByteBuffer bb = ioBufferPool.newByteBuffer(32);

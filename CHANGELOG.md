@@ -9,6 +9,15 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Writing into a borrowed buffer after its session closed no longer crashes the JVM.** A session freed its buffer
+  pool's memory when it closed, even while another thread still held a buffer borrowed from it, and the next write
+  into that buffer crashed the JVM. The memory is now released only once every buffer is back, and otherwise left to
+  the garbage collector.
+
 ## [0.9.3] - 2026-10-12
 
 ### Added
