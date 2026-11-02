@@ -16,9 +16,10 @@
 package org.lolaf.betty.api.ss;
 
 import lombok.Value;
+import org.lolaf.ringos.idling.BusySpinIdleStrategy;
 import org.lolaf.ringos.idling.IdleStrategy;
-import org.lolaf.ringos.idling.TimedWaitNotifyIdleStrategy;
 import org.lolaf.ringos.idling.WaitNotifyIdleStrategy;
+import org.lolaf.ringos.idling.YieldingIdleStrategy;
 
 import java.io.IOException;
 import java.nio.channels.SelectionKey;
@@ -30,8 +31,10 @@ import java.util.function.Consumer;
  * Polls the selector and never blocks, handing the waiting to a ringos {@link IdleStrategy}.
  * <p>
  * This is the low-latency option: readiness is seen on the next pass rather than after a wakeup, and a
- * cross-thread write needs no syscall to be noticed. The cost is a core - a busy-spinning idle strategy holds one
- * whether or not there is traffic - so it suits a thread dedicated to sessions that matter, not a general pool.
+ * cross-thread write calls {@link IdleStrategy#wakeup()}, which cuts a park short without a selector syscall. The cost
+ * is a core - a busy-spinning idle strategy holds one whether or not there is traffic - so it suits a thread
+ * dedicated to sessions that matter, not a general pool. Readiness itself never ends a park: a parking strategy
+ * still delays inbound data by up to its park period.
  */
 @Value
 public class IdleStrategySelectStrategy implements SelectStrategy {
@@ -45,23 +48,26 @@ public class IdleStrategySelectStrategy implements SelectStrategy {
     /**
      * @param idleStrategy how the IO thread waits between passes
      * @throws NullPointerException     if {@code idleStrategy} is {@code null}
-     * @throws IllegalArgumentException if it is one of the wait/notify strategies, which park until a
-     *                                  {@code wakeup()} this strategy never sends
+     * @throws IllegalArgumentException if it is a {@link WaitNotifyIdleStrategy}, which parks with no timeout
+     *                                  and so would never see inbound data on a quiet thread
      */
     public IdleStrategySelectStrategy(IdleStrategy idleStrategy) {
         Objects.requireNonNull(idleStrategy, "idleStrategy");
-        if (idleStrategy instanceof WaitNotifyIdleStrategy || idleStrategy instanceof TimedWaitNotifyIdleStrategy) {
+        if (idleStrategy instanceof WaitNotifyIdleStrategy) {
             throw new IllegalArgumentException(idleStrategy.getClass().getSimpleName() + " cannot drive a select "
-                    + "loop: it parks until wakeup() and nothing wakes it here, so the IO thread would stop "
-                    + "polling. Use BusySpinIdleStrategy, YieldingIdleStrategy or BackoffIdleStrategy, or "
-                    + "WakeupSelectStrategy if the point is to block");
+                    + "loop: it parks until wakeup(), and incoming data wakes nothing, so the IO thread would stop "
+                    + "polling. Use BusySpinIdleStrategy, YieldingIdleStrategy, BackoffIdleStrategy or "
+                    + "TimedWaitNotifyIdleStrategy, or WakeupSelectStrategy if the point is to block");
         }
         this.idleStrategy = idleStrategy;
     }
 
     @Override
-    public boolean requireSelectorWakeup() {
-        return false;
+    public Runnable wakeupAction(Selector selector) {
+        if (idleStrategy instanceof BusySpinIdleStrategy || idleStrategy instanceof YieldingIdleStrategy) {
+            return null;
+        }
+        return idleStrategy::wakeup;
     }
 
     @Override

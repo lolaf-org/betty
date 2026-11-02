@@ -190,7 +190,7 @@ class IOWorkerImpl implements IOWorker {
                 selector = ioWorkersGroupSettings.getSelectorProvider().openSelector();
                 optimizedSelector = selector;
             }
-            this.selectorWakeupIfNeeded = selectStrategy.requireSelectorWakeup() ? selector::wakeup : null;
+            this.selectorWakeupIfNeeded = selectStrategy.wakeupAction(selector);
         } catch (IOException ex) {
             throw new StartStopException(ex);
         }

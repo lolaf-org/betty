@@ -30,15 +30,16 @@ import java.util.function.Consumer;
 public interface SelectStrategy {
 
     /**
-     * Whether a thread that queues work for this session must wake the selector for it to be noticed.
+     * What a thread that queues work for the IO thread runs so the work is noticed before the current wait ends.
      * <p>
-     * True for a blocking select, which would otherwise sit until its timeout; false for a polling one, which
-     * comes round on its own. Answering true when it is not needed costs a syscall per cross-thread write, and
-     * answering false when it is needed stalls that write until the select times out.
+     * Called once per selector, and the action is then run on every cross-thread write, so return {@code null}
+     * when the IO thread never waits long enough to need it: a needless action costs every such write, a missing
+     * one stalls the write until the wait times out.
      *
-     * @return true if {@code Selector.wakeup()} is required
+     * @param selector the worker's selector
+     * @return the wake-up action, or {@code null} if none is needed
      */
-    boolean requireSelectorWakeup();
+    Runnable wakeupAction(Selector selector);
 
     /**
      * Runs one selection pass, and is where the strategy's waiting happens.

@@ -11,6 +11,17 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ## [Unreleased]
 
+### Changed
+
+- **A write or task sent from another thread now wakes an IO thread that is parked by `BackoffIdleStrategy`.** With
+  `IdleStrategySelectStrategy`, such a write used to wait for the rest of the park, up to 1 ms with the defaults; it is
+  now picked up at once. Incoming data still waits for the park to end.
+- **`IdleStrategySelectStrategy` now accepts `TimedWaitNotifyIdleStrategy`**, since the thread is woken for work
+  queued from other threads and its wait is bounded. `WaitNotifyIdleStrategy` is still refused.
+- **`SelectStrategy.requireSelectorWakeup()` is replaced by `wakeupAction(Selector)`**, which returns what to run to
+  wake the IO thread, or `null` if nothing needs to be run. A custom strategy that returned `true` should return
+  `selector::wakeup`, and one that returned `false` should return `null`.
+
 ### Fixed
 
 - **Writing into a borrowed buffer after its session closed no longer crashes the JVM.** A session freed its buffer

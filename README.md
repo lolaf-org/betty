@@ -189,7 +189,7 @@ thread group carrying the sessions that matter and block on the rest. Unset, a t
 
 `IdleStrategySelectStrategy` takes a ringos `IdleStrategy`, consulted after every `selectNow()` pass with the number
 of keys that pass found — so the select strategy picks *whether* to block and the idle strategy picks *how hard to
-wait*. Four of the six ringos ships suit a selector loop:
+wait*. Five of the six ringos ships suit a selector loop:
 
 | Idle strategy | Behaviour | Cost while idle |
 |---|---|---|
@@ -197,9 +197,12 @@ wait*. Four of the six ringos ships suit a selector loop:
 | `YieldingIdleStrategy` | One `Thread.yield()`: offers the core to anything else runnable, but never parks, so a wake-up is a scheduler decision away rather than a timer away | A core, unless something else wants it |
 | `BackoffIdleStrategy` | Escalates — spins, then yields, then parks for a period that doubles up to a ceiling. A pass that finds a ready key resets it to spinning. The no-arg constructor defaults to 10 spins, 5 yields and parks doubling from 50 µs to 1 ms; the four-arg one sets `maxSpins`, `maxYields`, `minParkPeriodNs` and `maxParkPeriodNs` yourself | Almost nothing once quiet, for up to the park ceiling in wake-up delay |
 | `TimerSlackAwareBackoffIdleStrategy` | The same escalation and the same two constructors, and it narrows the thread's OS timer slack through `prctl` so a `minParkPeriodNs` under 50 µs is not rounded back up to it. Linux only | As `BackoffIdleStrategy` |
+| `TimedWaitNotifyIdleStrategy` | Waits on a monitor for a fixed timeout, or until a cross-thread write or task wakes it. No spinning, so even a busy thread pays a wait between passes that find nothing | Almost nothing, for up to the timeout in delay on incoming data |
 
-The other two, `WaitNotifyIdleStrategy` and `TimedWaitNotifyIdleStrategy`, park until a `wakeup()` a select loop
-never sends, so `IdleStrategySelectStrategy` rejects them in its constructor.
+A write or task queued from another thread calls the idle strategy's `wakeup()`, which cuts a `BackoffIdleStrategy`
+park short, so only incoming data waits out the park. `TimedWaitNotifyIdleStrategy` works the same way: it waits up to
+its timeout or until woken. `WaitNotifyIdleStrategy` has no timeout, and incoming data wakes nothing, so
+`IdleStrategySelectStrategy` rejects it in its constructor.
 
 ## Load balancing sessions across workers
 

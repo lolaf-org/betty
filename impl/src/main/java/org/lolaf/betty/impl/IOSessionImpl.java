@@ -368,7 +368,8 @@ class IOSessionImpl implements IOSession {
         this.ioThreadTaskRequestsRetryStrategy = getRetryStrategy(tasksRingBufferFullConsumer);
         this.ioThreadSocketWriteRequestsRetryStrategy = getRetryStrategy(writesRingBufferFullConsumer);
         this.ioWorkerThread = ioWorkerThread;
-        this.wakeupSelectorIfNeeded = selectStrategy.requireSelectorWakeup() ? selector::wakeup : this::nothingToDo;
+        Runnable wakeupAction = selectStrategy.wakeupAction(selector);
+        this.wakeupSelectorIfNeeded = wakeupAction != null ? wakeupAction : this::nothingToDo;
         this.selectionKey = socket.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, this);
     }
 

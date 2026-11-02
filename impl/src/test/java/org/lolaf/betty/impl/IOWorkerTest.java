@@ -25,6 +25,7 @@ import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
 import org.lolaf.betty.api.settings.SSLSettings;
 import org.lolaf.betty.api.ss.IdleStrategySelectStrategy;
 import org.lolaf.ringos.Deadline;
+import org.lolaf.ringos.idling.BackoffIdleStrategy;
 import org.lolaf.ringos.idling.BusySpinIdleStrategy;
 import org.lolaf.ringos.idling.IdleStrategy;
 import org.lolaf.ringos.idling.TimedWaitNotifyIdleStrategy;
@@ -803,26 +804,55 @@ class IOWorkerTest {
     }
 
     /**
-     * A select loop signals nothing - it polls and idles on what the poll found - so a strategy that waits to be told
-     * waits for good, and the worker silently stops selecting. Refused where it is configured, which is the only
+     * Incoming data signals nothing to a polling loop, so a strategy that waits to be told with no timeout waits for
+     * good on a quiet thread, and the worker silently stops selecting. Refused where it is configured, which is the only
      * point at which it still looks like a mistake rather than a hang.
      */
     @Test
-    void aWaitNotifyIdleStrategyIsRefusedRatherThanLeftToStallTheWorker() {
+    void anUntimedWaitNotifyIdleStrategyIsRefusedRatherThanLeftToStallTheWorker() {
         assertThatThrownBy(() -> new IdleStrategySelectStrategy(new WaitNotifyIdleStrategy()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("WaitNotifyIdleStrategy")
                 .hasMessageContaining("stop");
 
-        assertThatThrownBy(() -> new IdleStrategySelectStrategy(new TimedWaitNotifyIdleStrategy(Duration.ofMillis(1))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("TimedWaitNotifyIdleStrategy");
+        assertThatCode(() -> new IdleStrategySelectStrategy(new TimedWaitNotifyIdleStrategy(Duration.ofMillis(1))))
+                .as("its wait is bounded, so readiness is still polled")
+                .doesNotThrowAnyException();
 
         assertThatThrownBy(() -> new IdleStrategySelectStrategy(null))
                 .isInstanceOf(NullPointerException.class);
 
         assertThatCode(() -> new IdleStrategySelectStrategy(BusySpinIdleStrategy.getInstance()))
                 .doesNotThrowAnyException();
+    }
+
+    /**
+     * The park is far longer than the await, so a task can only run in time if submitting it cut the park short.
+     */
+    @Test
+    void aTaskSubmittedFromAnotherThreadWakesAParkedIdleStrategy() throws Exception {
+        long thirtySeconds = TimeUnit.SECONDS.toNanos(30);
+        String name = "parked-worker";
+        worker = new IOWorkerImpl(name, IOWorkersGroupSettings.builder().id(name).build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder()
+                        .selectStrategy(new IdleStrategySelectStrategy(new BackoffIdleStrategy(0, 0, thirtySeconds, thirtySeconds)))
+                        .build());
+        worker.start();
+        AtomicReference<Thread> ioThread = new AtomicReference<>();
+        IOSession session = registerSession(new CountingListener() {
+            @Override
+            public void onConnected(IOSession session) {
+                ioThread.set(Thread.currentThread());
+            }
+        });
+        await().atMost(Duration.ofSeconds(10)).until(() -> ioThread.get() != null);
+
+        for (int i = 0; i < 3; i++) {
+            await().atMost(Duration.ofSeconds(10)).until(() -> ioThread.get().getState() == Thread.State.TIMED_WAITING);
+            CountDownLatch ran = new CountDownLatch(1);
+            session.processTask(ran::countDown);
+            assertThat(ran.await(5, TimeUnit.SECONDS)).as("task %d ran before the park expired", i).isTrue();
+        }
     }
 
     private static class CountingListener implements IOEventsListener {
