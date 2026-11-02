@@ -151,7 +151,7 @@ public class BackPressureBenchmark {
 
     private static SelectStrategy selectStrategy(ClientSettings clientSettings) {
         return clientSettings == ClientSettings.LOW_LATENCY
-                ? new IdleStrategySelectStrategy(BusySpinIdleStrategy.getInstance())
+                ? new IdleStrategySelectStrategy(BusySpinIdleStrategy::getInstance)
                 : new WakeupSelectStrategy(1);
     }
 

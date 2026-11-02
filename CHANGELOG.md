@@ -21,6 +21,10 @@ matching `[x.y.z]:` link definition at the foot of the file.
 - **`SelectStrategy.requireSelectorWakeup()` is replaced by `wakeupAction(Selector)`**, which returns what to run to
   wake the IO thread, or `null` if nothing needs to be run. A custom strategy that returned `true` should return
   `selector::wakeup`, and one that returned `false` should return `null`.
+- **`IdleStrategySelectStrategy` now takes a `Supplier<IdleStrategy>`, and each IO thread gets its own instance.**
+  Before, the threads of a thread group shared a single idle strategy. Their backoff state got mixed, and a wakeup
+  could reach the wrong thread. Replace `new IdleStrategySelectStrategy(new BackoffIdleStrategy())` with
+  `new IdleStrategySelectStrategy(BackoffIdleStrategy::new)`.
 
 ### Fixed
 

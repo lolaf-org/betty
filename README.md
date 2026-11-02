@@ -179,7 +179,7 @@ averaged over a cycle it sends at exactly the rate the client reads.
 | Strategy | Behaviour |
 |---|---|
 | `WakeupSelectStrategy` | The default. Blocks in `Selector.select()` until readiness or its timeout, giving the core back. A write from another thread has to wake the selector, so it costs a syscall |
-| `IdleStrategySelectStrategy` | Never blocks: `selectNow()`, then a ringos `IdleStrategy` decides whether to spin, yield or park. Readiness is seen on the next pass and a cross-thread write needs no wakeup. The cost is a core, held whether or not there is traffic |
+| `IdleStrategySelectStrategy` | Never blocks: `selectNow()`, then a ringos `IdleStrategy` decides whether to spin, yield or park. Readiness is seen on the next pass, and a cross-thread write only wakes a parked idle strategy, which needs no selector syscall. The cost is a core, held whether or not there is traffic |
 
 It is set on an `IOThreadGroup`, not on the whole `IOWorkersGroup`, so one client or server can spend a core on the
 thread group carrying the sessions that matter and block on the rest. Unset, a thread group gets
@@ -187,7 +187,8 @@ thread group carrying the sessions that matter and block on the rest. Unset, a t
 
 ### Which idle strategy
 
-`IdleStrategySelectStrategy` takes a ringos `IdleStrategy`, consulted after every `selectNow()` pass with the number
+`IdleStrategySelectStrategy` takes a supplier of ringos `IdleStrategy`, such as `BackoffIdleStrategy::new`, and gives
+each IO thread of the group its own instance, since a strategy holds the backoff state of one thread. It is consulted after every `selectNow()` pass with the number
 of keys that pass found — so the select strategy picks *whether* to block and the idle strategy picks *how hard to
 wait*. Five of the six ringos ships suit a selector loop:
 

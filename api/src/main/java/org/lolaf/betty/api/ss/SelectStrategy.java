@@ -30,6 +30,18 @@ import java.util.function.Consumer;
 public interface SelectStrategy {
 
     /**
+     * The strategy one IO thread of a group runs, called once per thread when its worker is created.
+     * <p>
+     * A strategy holding per-thread state must return a new instance, since a group shares the configured one
+     * between all its threads; a stateless one returns itself, the default.
+     *
+     * @return the strategy for a single IO thread
+     */
+    default SelectStrategy forIOThread() {
+        return this;
+    }
+
+    /**
      * What a thread that queues work for the IO thread runs so the work is noticed before the current wait ends.
      * <p>
      * Called once per selector, and the action is then run on every cross-thread write, so return {@code null}

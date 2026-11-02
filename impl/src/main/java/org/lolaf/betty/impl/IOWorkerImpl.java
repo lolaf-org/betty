@@ -103,7 +103,7 @@ class IOWorkerImpl implements IOWorker {
         this.name = "IO-worker-" + name;
         this.group = threadGroup.getName();
         this.running = new AtomicBoolean(false);
-        this.selectStrategy = threadGroup.getSelectStrategy();
+        this.selectStrategy = threadGroup.getSelectStrategy().forIOThread();
         this.ioWorkersGroupSettings = ioWorkersGroupSettings;
         this.selectKeyConsumer = this::onSelectionKey;
         this.ioWorkerStatistics = ioWorkersGroupSettings.getIoWorkerStatisticsProvider().get(this);
@@ -423,15 +423,20 @@ class IOWorkerImpl implements IOWorker {
             selectUntilStopped();
         } finally {
             // also on an Error: a session's disconnection only ever runs on its IO thread, so this is its last chance
-            commandsClosed = true;
-            synchronized (pendingCommands) {
-                // a barrier: a producer still inside has either queued its command or seen the queue closed. The drain below
-                // stays outside, as returning a session to its origin takes that worker's lock
-            }
+            closeCommands();
+            // outside the lock: returning a session to its origin takes that worker's lock
             while (pendingCommands.poll(this::onIOWorkerCommandAfterStop)) {
                 // drain
             }
             stopRegisteredSessions();
+        }
+    }
+
+    private void closeCommands() {
+        // set before taking the lock: a producer retrying on a full queue holds it until it sees the flag
+        commandsClosed = true;
+        synchronized (pendingCommands) {
+            // waits out a producer that read the flag before it was set, so its command is in the queue for the drain
         }
     }
 
