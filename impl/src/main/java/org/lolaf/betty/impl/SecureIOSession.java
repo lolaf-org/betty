@@ -48,6 +48,7 @@ class SecureIOSession extends IOSessionImpl {
     private final ByteBuffer[] sourceByteBufferArray;
     private final ByteBuffer encodingWriteBuffer;
     private final ByteBuffer[] decodingReadBuffer;
+    private final int maxDecodedBufferSize;
     private final Duration handshakeTimeout;
     private boolean encodedBytesPending;
     private SSLHandshake handshake;
@@ -82,6 +83,7 @@ class SecureIOSession extends IOSessionImpl {
                 ? ByteBuffer.allocateDirect(sslEngine.getSession().getPacketBufferSize())
                 : ByteBuffer.allocate(sslEngine.getSession().getPacketBufferSize());
         decodingReadBuffer = new ByteBuffer[]{readBuffer};
+        maxDecodedBufferSize = Math.max(getMaxReadBufferSize(), readBuffer.capacity());
     }
 
     private void callListenerForEngineSetup(SSLSettings sslSettings) {
@@ -406,7 +408,9 @@ class SecureIOSession extends IOSessionImpl {
             SSLEngineResult result = sslEngine.unwrap(readBuffer, decodingReadBuffer);
             switch (result.getStatus()) {
                 case BUFFER_OVERFLOW:
-                    throw new IllegalStateException("BUFFER_OVERFLOW while reading, should have never happened: " + encodingWriteBuffer.capacity());
+                    decodedBuffer = decodingReadBuffer[0] = makeRoomInReadBuffer(decodedBuffer,
+                            sslEngine.getSession().getApplicationBufferSize(), maxDecodedBufferSize);
+                    break;
                 case BUFFER_UNDERFLOW:
                     // our socket buffer is too small compared to ssl max packet size, increase its size and retry
                     // decoding.

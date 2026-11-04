@@ -11,6 +11,16 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ## [Unreleased]
 
+### Added
+
+- **Messages larger than the read buffer are received whole.** When an incomplete message fills the read buffer, the
+  buffer now grows, up to the new `IOSettings.maxReadBufferSize` (1 MB by default). A message past that limit
+  disconnects the session after `onError` with a `ReadBufferFullException` naming the session and the limit. Set
+  `maxReadBufferSize` equal to `readBufferSize` to turn growth off and keep only that error.
+- **`IOSettings.readBufferGrowthStrategy` chooses how the read buffer grows**, doubling by default. It sees the start
+  of the incomplete message, so a strategy that knows your framing can read the message length and size the buffer for
+  it in one step.
+
 ### Changed
 
 - **A write or task sent from another thread now wakes an IO thread that is parked by `BackoffIdleStrategy`.** With
@@ -28,6 +38,10 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ### Fixed
 
+- **A plain session no longer stalls on a message larger than its read buffer.** It used to stop delivering data
+  without reporting any error.
+- **A TLS session no longer fails on a message larger than about 16 KB** with an `IllegalStateException` reading
+  `BUFFER_OVERFLOW while reading, should have never happened`.
 - **Writing into a borrowed buffer after its session closed no longer crashes the JVM.** A session freed its buffer
   pool's memory when it closed, even while another thread still held a buffer borrowed from it, and the next write
   into that buffer crashed the JVM. The memory is now released only once every buffer is back, and otherwise left to

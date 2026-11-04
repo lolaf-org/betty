@@ -136,6 +136,12 @@ buffer, which the next read overwrites, and a buffer borrowed for a write goes b
 write completes or fails. Read what you need inside the callback, or copy it. Retaining one is the one mistake that
 will bite you.
 
+Consume only whole messages and leave an incomplete one in the buffer: the next `onRead` hands it back with the bytes
+that followed. A message larger than `IOSettings.readBufferSize` (8 KB) makes the buffer grow, by
+`IOSettings.readBufferGrowthStrategy` (doubling by default) up to `IOSettings.maxReadBufferSize` (1 MB), so the buffer
+can be a different one from one call to the next. A message past that maximum disconnects the session, after
+`onError` with a `ReadBufferFullException`.
+
 ## Examples
 
 `betty-examples` holds the compiling, running form of the snippet above:

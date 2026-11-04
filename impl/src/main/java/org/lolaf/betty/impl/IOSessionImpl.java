@@ -89,6 +89,10 @@ class IOSessionImpl implements IOSession {
     private final AtomicBoolean started;
     private final IntFunction<ByteBuffer> readBufferAllocator;
     @Getter(AccessLevel.PACKAGE)
+    private final int maxReadBufferSize;
+    private final ReadBufferGrowthStrategy readBufferGrowthStrategy;
+    private final FullReadBufferHandler fullReadBufferHandler;
+    @Getter(AccessLevel.PACKAGE)
     private final boolean trackReceiveTime;
     private final Set<IOSessionTag> tags;
     private final IOThreadRequest localIOThreadRequest;
@@ -128,6 +132,7 @@ class IOSessionImpl implements IOSession {
 
     public IOSessionImpl(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder, IOSettings ioSettings, RemoteSessionsFilter remoteSessionsFilter,
                          IOBufferPool sharedIOBufferPool, IOWorkersGroupSettings ioWorkersGroupSettings) {
+        checkReadBufferSizes(ioSettings);
         this.socket = socket;
         this.ioEventsListener = baseBuilder.getIoEventsListener();
         this.socketAddress = (InetSocketAddress) socket.socket().getRemoteSocketAddress();
@@ -149,6 +154,11 @@ class IOSessionImpl implements IOSession {
         this.sharedIOBufferPool = sharedIOBufferPool != null;
         this.readBufferAllocator = ioSettings.isReadDirectBuffer() ? ByteBuffer::allocateDirect : ByteBuffer::allocate;
         this.readBuffer = readBufferAllocator.apply(ioSettings.getReadBufferSize());
+        this.maxReadBufferSize = ioSettings.getMaxReadBufferSize();
+        this.readBufferGrowthStrategy = ioSettings.getReadBufferGrowthStrategy();
+        this.fullReadBufferHandler = maxReadBufferSize == ioSettings.getReadBufferSize()
+                ? this::rejectFullReadBuffer
+                : this::growFullReadBuffer;
         this.started = new AtomicBoolean(false);
         this.connectionState = ConnectionState.NOT_CONNECTED;
         this.ioWorkerThread = NO_IO_THREAD;
@@ -180,6 +190,18 @@ class IOSessionImpl implements IOSession {
         this.tags = new HashSet<>();
         this.tagsArray = new IOSessionTag[0];
         this.cpuTimeStats = new CpuTimeStats();
+    }
+
+    @FunctionalInterface
+    private interface FullReadBufferHandler {
+        ByteBuffer onFull(ByteBuffer buffer, int requiredFreeSpace, int maxCapacity) throws ReadBufferFullException;
+    }
+
+    static void checkReadBufferSizes(IOSettings ioSettings) {
+        if (ioSettings.getMaxReadBufferSize() < ioSettings.getReadBufferSize()) {
+            throw new IllegalArgumentException("maxReadBufferSize " + ioSettings.getMaxReadBufferSize()
+                    + " is smaller than readBufferSize " + ioSettings.getReadBufferSize());
+        }
     }
 
     private static IOStats ensureCorrectVoidIOStatsInCaseOfLoadCalculation(IOWorkersGroupSettings ioWorkersGroupSettings, IOStats.VoidStats voidStats) {
@@ -657,6 +679,34 @@ class IOSessionImpl implements IOSession {
         int readenBytes = readFromSocket(readBuffer);
         activeIOStats.onSocketRead(this, readenBytes, localReadStartTime);
         processIOEventsListenerOnRead(readBuffer.flip(), localReceiveTimeInNanos);
+        if (!readBuffer.hasRemaining() && !disconnectionAfterRead) {
+            readBuffer = fullReadBufferHandler.onFull(readBuffer, 1, maxReadBufferSize);
+        }
+    }
+
+    /**
+     * Returns a write mode buffer holding what {@code buffer} holds, sized by
+     * {@link IOSettings#getReadBufferGrowthStrategy()} but never below {@code requiredFreeSpace} bytes of room nor
+     * above {@code maxCapacity}.
+     *
+     * @throws ReadBufferFullException when the room does not fit within {@code maxCapacity}, or growth is disabled
+     */
+    ByteBuffer makeRoomInReadBuffer(ByteBuffer buffer, int requiredFreeSpace, int maxCapacity) throws ReadBufferFullException {
+        return fullReadBufferHandler.onFull(buffer, requiredFreeSpace, maxCapacity);
+    }
+
+    private ByteBuffer rejectFullReadBuffer(ByteBuffer buffer, int requiredFreeSpace, int maxCapacity) throws ReadBufferFullException {
+        throw new ReadBufferFullException(id, maxCapacity);
+    }
+
+    private ByteBuffer growFullReadBuffer(ByteBuffer buffer, int requiredFreeSpace, int maxCapacity) throws ReadBufferFullException {
+        long neededCapacity = (long) buffer.position() + requiredFreeSpace;
+        if (neededCapacity > maxCapacity) {
+            throw new ReadBufferFullException(id, maxCapacity);
+        }
+        int requested = readBufferGrowthStrategy.grow(buffer.duplicate().flip().asReadOnlyBuffer(), buffer.capacity(), maxCapacity);
+        int capacity = (int) Math.min(Math.max(requested, neededCapacity), maxCapacity);
+        return readBufferAllocator.apply(capacity).put(buffer.flip());
     }
 
     void processIOEventsListenerOnRead(ByteBuffer readenBuffer, long localReceiveTimeInNanos) {
