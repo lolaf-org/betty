@@ -40,6 +40,9 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 - **A plain session no longer stalls on a message larger than its read buffer.** It used to stop delivering data
   without reporting any error.
+- **A connection the server could not set up is now closed.** When creating its session failed, for example on
+  invalid settings returned by `IOEventsListener.getIOSettings`, the error was logged but the peer stayed connected,
+  waiting for an answer that never came.
 - **A TLS session no longer fails on a message larger than about 16 KB** with an `IllegalStateException` reading
   `BUFFER_OVERFLOW while reading, should have never happened`.
 - **Writing into a borrowed buffer after its session closed no longer crashes the JVM.** A session freed its buffer

@@ -669,8 +669,15 @@ class IOWorkerImpl implements IOWorker {
     private void registerInternal(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder,
                                   IOWorkerImpl handOffTarget) throws IOException {
         log.info("Registering socket {} connected to {}", socket, name);
-        socket.configureBlocking(false);
-        IOSessionImpl ioSession = createIOSession(clientSession, socket, baseBuilder);
+        IOSessionImpl ioSession;
+        try {
+            socket.configureBlocking(false);
+            ioSession = createIOSession(clientSession, socket, baseBuilder);
+        } catch (IOException | RuntimeException e) {
+            // no session owns the socket yet, and not every caller closes it
+            closeQuietly(socket);
+            throw e;
+        }
         if (handOffTarget != null) {
             ((SecureIOSession) ioSession).handOffAfterHandshake(handOffTarget);
         }

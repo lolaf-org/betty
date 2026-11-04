@@ -17,8 +17,10 @@ package org.lolaf.betty.impl;
 
 
 import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Named;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.lolaf.betty.api.Client;
 import org.lolaf.betty.api.ClientBuilder;
@@ -26,12 +28,15 @@ import org.lolaf.betty.api.ServerBuilder;
 import org.lolaf.betty.api.io.*;
 import org.lolaf.betty.api.lb.MinIOThreadLoadSessionLoadBalancer;
 import org.lolaf.betty.api.settings.IOBufferPoolSettings;
+import org.lolaf.betty.api.settings.IOSettings;
 import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
+import org.lolaf.betty.api.settings.ServerSSLSettings;
 import org.lolaf.betty.api.stats.IOStats;
 import org.lolaf.betty.api.stats.IOWorkerStats;
 import org.lolaf.ringos.Deadline;
 
 import javax.net.ssl.SSLHandshakeException;
+import java.net.Socket;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -41,6 +46,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -49,6 +55,40 @@ import static org.mockito.Mockito.*;
 
 
 class ServerImplTest extends AbstractTest {
+
+    /**
+     * One worker serving the sessions it accepts, and a TLS acceptor handing them to another group: the two paths that
+     * create a session on the accepting thread.
+     */
+    static Stream<Arguments> serversCreatingSessionsOnTheAcceptingThread() {
+        int plainPort = TestPorts.findFree();
+        int tlsPort = TestPorts.findFree();
+        return Stream.of(
+                Arguments.of(Named.of("plain", getTestServerBuilder(plainPort).toBuilder()
+                        .ioWorkersGroup(IOWorkersGroupSettings.builder().id("single-worker-" + plainPort).clearIoThreadGroups()
+                                .ioThreadGroup(IOWorkersGroupSettings.IOThreadGroup.builder().ioThreadCount(1).build())
+                                .build().newInstance())
+                        .build())),
+                Arguments.of(Named.of("tls with an acceptor", getTestServerBuilder(tlsPort).toBuilder()
+                        .serverSSLSettings(ServerSSLSettings.builder().sslContext(getServerSSLContext()).build())
+                        .acceptorIoWorkerGroup(IOWorkersGroupSettings.builder().id("acceptor-" + tlsPort).build().newInstance())
+                        .ioWorkersGroup(IOWorkersGroupSettings.builder().id("sessions-" + tlsPort).build().newInstance())
+                        .build())));
+    }
+
+    @ParameterizedTest
+    @MethodSource("serversCreatingSessionsOnTheAcceptingThread")
+    void aSessionThatFailsToBeCreatedClosesTheAcceptedSocket(ServerBuilder serverBuilder) throws Exception {
+        when(serverBuilder.getIoEventsListener().getIOSettings(any(), any()))
+                .thenReturn(IOSettings.builder().readBufferSize(4096).maxReadBufferSize(1024).build());
+        server = serverBuilder.newInstance();
+        server.start();
+
+        try (Socket peer = new Socket("localhost", serverBuilder.getBindAddress().getPort())) {
+            peer.setSoTimeout(5_000);
+            assertThat(peer.getInputStream().read()).as("the server closed the connection").isEqualTo(-1);
+        }
+    }
 
     /**
      * Whether the error is only the peer having closed its socket abortively. Stopping a session on an immediate
