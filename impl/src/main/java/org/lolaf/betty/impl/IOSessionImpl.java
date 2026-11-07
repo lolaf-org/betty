@@ -192,11 +192,6 @@ class IOSessionImpl implements IOSession {
         this.cpuTimeStats = new CpuTimeStats();
     }
 
-    @FunctionalInterface
-    private interface FullReadBufferHandler {
-        ByteBuffer onFull(ByteBuffer buffer, int requiredFreeSpace, int maxCapacity) throws ReadBufferFullException;
-    }
-
     static void checkReadBufferSizes(IOSettings ioSettings) {
         if (ioSettings.getMaxReadBufferSize() < ioSettings.getReadBufferSize()) {
             throw new IllegalArgumentException("maxReadBufferSize " + ioSettings.getMaxReadBufferSize()
@@ -230,7 +225,6 @@ class IOSessionImpl implements IOSession {
             bufferOut.position(bufferOut.limit());
         }
     }
-
 
     private RetryStrategy getRetryStrategy(Consumer<IOSession> ringBufferFullConsumer) {
         return new RetryStrategy() {
@@ -969,7 +963,8 @@ class IOSessionImpl implements IOSession {
     }
 
     private boolean isPendingWriteNotFullyWritten() {
-        return pendingWrite.byteBuffer != null && !isFullyWritten(pendingWrite.byteBuffer);
+        ByteBuffer pendingWritesOut = pendingWrite.byteBuffer;
+        return pendingWritesOut != null && !isFullyWritten(pendingWritesOut);
     }
 
     private boolean isPendingWriteFullyWritten() {
@@ -1062,6 +1057,11 @@ class IOSessionImpl implements IOSession {
 
     private enum ConnectionState {
         NOT_CONNECTED, CONNECTED, DISCONNECTED
+    }
+
+    @FunctionalInterface
+    private interface FullReadBufferHandler {
+        ByteBuffer onFull(ByteBuffer buffer, int requiredFreeSpace, int maxCapacity) throws ReadBufferFullException;
     }
 
     private interface IOThreadSender {
