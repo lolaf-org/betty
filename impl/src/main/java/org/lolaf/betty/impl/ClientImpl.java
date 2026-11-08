@@ -48,6 +48,7 @@ class ClientImpl implements Client {
     private boolean embeddedScheduledExecutorService;
 
     private ClientImpl(ClientBuilder clientBuilder) {
+        IOSessionImpl.checkReadBufferSizes(clientBuilder.getIoSettings());
         this.clientBuilder = clientBuilder.toBuilder()
                 .ioEventsListener(getIOSessionEventsListenerProxy(clientBuilder.getIoEventsListener()))
                 .build();

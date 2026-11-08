@@ -45,8 +45,8 @@ public class WakeupSelectStrategy implements SelectStrategy {
     }
 
     @Override
-    public boolean requireSelectorWakeup() {
-        return true;
+    public Runnable wakeupAction(Selector selector) {
+        return selector::wakeup;
     }
 
     @Override

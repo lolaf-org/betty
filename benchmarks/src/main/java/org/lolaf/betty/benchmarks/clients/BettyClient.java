@@ -59,7 +59,7 @@ public class BettyClient extends AbstractClientBenchmark {
 
     private static SelectStrategy getSelectStrategy(ClientSettings clientSettings) {
         return clientSettings.equals(ClientSettings.LOW_LATENCY)
-                ? new IdleStrategySelectStrategy(BusySpinIdleStrategy.getInstance()) : new WakeupSelectStrategy(1);
+                ? new IdleStrategySelectStrategy(BusySpinIdleStrategy::getInstance) : new WakeupSelectStrategy(1);
     }
 
     private boolean readMessage(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {

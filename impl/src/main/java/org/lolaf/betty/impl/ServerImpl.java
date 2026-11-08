@@ -52,6 +52,7 @@ class ServerImpl extends Startable.SimpleStartable<Server> implements Server {
     private SelectionKey acceptKey;
 
     private ServerImpl(ServerBuilder serverBuilder) {
+        IOSessionImpl.checkReadBufferSizes(serverBuilder.getIoSettings());
         this.bindAddress = serverBuilder.getBindAddress();
         this.ioWorkersGroup = Optional.ofNullable(serverBuilder.getIoWorkersGroup())
                 .orElseGet(() -> IOWorkersGroupSettings.builder()

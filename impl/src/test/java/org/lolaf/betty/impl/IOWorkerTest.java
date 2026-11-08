@@ -25,11 +25,9 @@ import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
 import org.lolaf.betty.api.settings.SSLSettings;
 import org.lolaf.betty.api.ss.IdleStrategySelectStrategy;
 import org.lolaf.ringos.Deadline;
-import org.lolaf.ringos.idling.BusySpinIdleStrategy;
-import org.lolaf.ringos.idling.IdleStrategy;
-import org.lolaf.ringos.idling.TimedWaitNotifyIdleStrategy;
-import org.lolaf.ringos.idling.WaitNotifyIdleStrategy;
+import org.lolaf.ringos.idling.*;
 
+import javax.net.ssl.SSLHandshakeException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
@@ -38,8 +36,11 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,11 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-import javax.net.ssl.SSLHandshakeException;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 
 /**
@@ -224,18 +221,15 @@ class IOWorkerTest {
         startWorker("full-queue-worker");
         CountDownLatch holding = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        IOSession session = registerSession(new IOEventsListener() {
-            @Override
-            public void onRead(IOSession ioSession, ByteBuffer message, long localReceiveTimeInNanos) {
-                message.position(message.limit());
-                holding.countDown();
-                try {
-                    release.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                ioSession.stop(Deadline.immediate());
+        IOSession session = registerSession((ioSession, message, localReceiveTimeInNanos) -> {
+            message.position(message.limit());
+            holding.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
+            ioSession.stop(Deadline.immediate());
         });
         writeToPeer("hold the IO thread");
         assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
@@ -281,13 +275,10 @@ class IOWorkerTest {
         CountDownLatch stopReturned = new CountDownLatch(1);
         try (SocketChannel stoppingSocket = SocketChannel.open(peerListener.getLocalAddress());
              SocketChannel stoppingPeer = peerListener.accept()) {
-            stoppingWorker.register(true, stoppingSocket, ClientBuilder.builder().id("stopping-session").ioEventsListener(new IOEventsListener() {
-                @Override
-                public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
-                    message.position(message.limit());
-                    heldSession.stop(Deadline.immediate());
-                    stopReturned.countDown();
-                }
+            stoppingWorker.register(true, stoppingSocket, ClientBuilder.builder().id("stopping-session").ioEventsListener((session, message, localReceiveTimeInNanos) -> {
+                message.position(message.limit());
+                heldSession.stop(Deadline.immediate());
+                stopReturned.countDown();
             }).build());
             stoppingPeer.write(ByteBuffer.wrap(new byte[]{1}));
 
@@ -321,17 +312,14 @@ class IOWorkerTest {
         CountDownLatch release = new CountDownLatch(1);
         try (SocketChannel heldSocket = SocketChannel.open(peerListener.getLocalAddress());
              SocketChannel heldPeer = peerListener.accept()) {
-            target.register(true, heldSocket, ClientBuilder.builder().id("held-session").ioEventsListener(new IOEventsListener() {
-                @Override
-                public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
-                    message.position(message.limit());
-                    targetThread.set(Thread.currentThread());
-                    holding.countDown();
-                    try {
-                        release.await();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
+            target.register(true, heldSocket, ClientBuilder.builder().id("held-session").ioEventsListener((session, message, localReceiveTimeInNanos) -> {
+                message.position(message.limit());
+                targetThread.set(Thread.currentThread());
+                holding.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 }
             }).build());
             heldPeer.write(ByteBuffer.wrap(new byte[]{1}));
@@ -585,15 +573,12 @@ class IOWorkerTest {
 
         startWorker("self-stopping-worker");
         IOWorkerImpl stoppingWorker = worker;
-        registerSession(new IOEventsListener() {
-            @Override
-            public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
-                message.position(message.limit());
-                long startInNanos = System.nanoTime();
-                stoppingWorker.stop(Deadline.of(GENEROUS_DEADLINE));
-                stopDurationInMillis.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startInNanos));
-                stopped.countDown();
-            }
+        registerSession((IOEventsListener) (session, message, localReceiveTimeInNanos) -> {
+            message.position(message.limit());
+            long startInNanos = System.nanoTime();
+            stoppingWorker.stop(Deadline.of(GENEROUS_DEADLINE));
+            stopDurationInMillis.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startInNanos));
+            stopped.countDown();
         });
         writeToPeer("stop yourself");
 
@@ -618,15 +603,12 @@ class IOWorkerTest {
         CountDownLatch stopped = new CountDownLatch(1);
 
         startWorker("self-stopping-session-worker");
-        registerSession(new IOEventsListener() {
-            @Override
-            public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
-                message.position(message.limit());
-                long startInNanos = System.nanoTime();
-                session.stop(Deadline.of(GENEROUS_DEADLINE));
-                stopDurationInMillis.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startInNanos));
-                stopped.countDown();
-            }
+        registerSession((IOEventsListener) (session, message, localReceiveTimeInNanos) -> {
+            message.position(message.limit());
+            long startInNanos = System.nanoTime();
+            session.stop(Deadline.of(GENEROUS_DEADLINE));
+            stopDurationInMillis.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startInNanos));
+            stopped.countDown();
         });
         writeToPeer("close yourself");
 
@@ -714,40 +696,6 @@ class IOWorkerTest {
     }
 
     /**
-     * An {@code onRead} that holds the IO thread for as long as the test tells it to, and does not let an interrupt
-     * cut it short - a callback doing real work, blocked on a lock or a disk write, behaves this way.
-     */
-    private static class BlockingListener implements IOEventsListener {
-        private final CountDownLatch entered;
-        private final CountDownLatch release;
-        private final AtomicBoolean callbackReturned = new AtomicBoolean();
-
-        BlockingListener(CountDownLatch entered, CountDownLatch release) {
-            this.entered = entered;
-            this.release = release;
-        }
-
-        @Override
-        public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
-            message.position(message.limit());
-            entered.countDown();
-            boolean interrupted = false;
-            while (true) {
-                try {
-                    release.await();
-                    break;
-                } catch (InterruptedException e) {
-                    interrupted = true;
-                }
-            }
-            callbackReturned.set(true);
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    /**
      * {@code TimerSlackAwareBackoffIdleStrategy} narrows the OS timer slack of whichever thread calls {@code prctl},
      * so its {@code assignToThread} is only worth anything when the IO thread itself makes the call, before it starts
      * parking. Nothing else can do it on that thread's behalf - which is why this asserts who called, not just that
@@ -789,7 +737,7 @@ class IOWorkerTest {
         String name = "timer-slack-worker";
         worker = new IOWorkerImpl(name, IOWorkersGroupSettings.builder().id(name).build(),
                 IOWorkersGroupSettings.IOThreadGroup.builder()
-                        .selectStrategy(new IdleStrategySelectStrategy(recordingIdleStrategy))
+                        .selectStrategy(new IdleStrategySelectStrategy(() -> recordingIdleStrategy))
                         .build());
         worker.start();
 
@@ -803,26 +751,119 @@ class IOWorkerTest {
     }
 
     /**
-     * A select loop signals nothing - it polls and idles on what the poll found - so a strategy that waits to be told
-     * waits for good, and the worker silently stops selecting. Refused where it is configured, which is the only
+     * A group shares its configured select strategy, but an idle strategy holds the backoff state of one thread and
+     * wakes only the thread parked on it.
+     */
+    @Test
+    void eachIOThreadOfAGroupIdlesOnItsOwnIdleStrategy() {
+        Map<IdleStrategy, Thread> assignedThreads = new ConcurrentHashMap<>();
+        IOWorkersGroupSettings.IOThreadGroup threadGroup = IOWorkersGroupSettings.IOThreadGroup.builder()
+                .selectStrategy(new IdleStrategySelectStrategy(() -> new BackoffIdleStrategy() {
+                    @Override
+                    public void assignToThread(Thread thread) {
+                        assignedThreads.put(this, thread);
+                    }
+                }))
+                .build();
+        IOWorkersGroupSettings settings = IOWorkersGroupSettings.builder().id("shared-group").build();
+        worker = new IOWorkerImpl("first", settings, threadGroup).start();
+        IOWorkerImpl second = new IOWorkerImpl("second", settings, threadGroup).start();
+        try {
+            await().atMost(Duration.ofSeconds(10)).until(() -> assignedThreads.size() == 2);
+
+            assertThat(new HashSet<>(assignedThreads.values())).hasSize(2);
+        } finally {
+            second.stop(Deadline.immediate());
+        }
+    }
+
+    /**
+     * Incoming data signals nothing to a polling loop, so a strategy that waits to be told with no timeout waits for
+     * good on a quiet thread, and the worker silently stops selecting. Refused where it is configured, which is the only
      * point at which it still looks like a mistake rather than a hang.
      */
     @Test
-    void aWaitNotifyIdleStrategyIsRefusedRatherThanLeftToStallTheWorker() {
-        assertThatThrownBy(() -> new IdleStrategySelectStrategy(new WaitNotifyIdleStrategy()))
+    void anUntimedWaitNotifyIdleStrategyIsRefusedRatherThanLeftToStallTheWorker() {
+        assertThatThrownBy(() -> new IdleStrategySelectStrategy(WaitNotifyIdleStrategy::new))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("WaitNotifyIdleStrategy")
                 .hasMessageContaining("stop");
 
-        assertThatThrownBy(() -> new IdleStrategySelectStrategy(new TimedWaitNotifyIdleStrategy(Duration.ofMillis(1))))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("TimedWaitNotifyIdleStrategy");
+        assertThatCode(() -> new IdleStrategySelectStrategy(() -> new TimedWaitNotifyIdleStrategy(Duration.ofMillis(1))))
+                .as("its wait is bounded, so readiness is still polled")
+                .doesNotThrowAnyException();
 
         assertThatThrownBy(() -> new IdleStrategySelectStrategy(null))
                 .isInstanceOf(NullPointerException.class);
 
-        assertThatCode(() -> new IdleStrategySelectStrategy(BusySpinIdleStrategy.getInstance()))
+        assertThatThrownBy(() -> new IdleStrategySelectStrategy(() -> null))
+                .isInstanceOf(NullPointerException.class);
+
+        assertThatCode(() -> new IdleStrategySelectStrategy(BusySpinIdleStrategy::getInstance))
                 .doesNotThrowAnyException();
+    }
+
+    /**
+     * The park is far longer than the await, so a task can only run in time if submitting it cut the park short.
+     */
+    @Test
+    void aTaskSubmittedFromAnotherThreadWakesAParkedIdleStrategy() throws Exception {
+        long thirtySeconds = TimeUnit.SECONDS.toNanos(30);
+        String name = "parked-worker";
+        worker = new IOWorkerImpl(name, IOWorkersGroupSettings.builder().id(name).build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder()
+                        .selectStrategy(new IdleStrategySelectStrategy(() -> new BackoffIdleStrategy(0, 0, thirtySeconds, thirtySeconds)))
+                        .build());
+        worker.start();
+        AtomicReference<Thread> ioThread = new AtomicReference<>();
+        IOSession session = registerSession(new CountingListener() {
+            @Override
+            public void onConnected(IOSession session) {
+                ioThread.set(Thread.currentThread());
+            }
+        });
+        await().atMost(Duration.ofSeconds(10)).until(() -> ioThread.get() != null);
+
+        for (int i = 0; i < 3; i++) {
+            await().atMost(Duration.ofSeconds(10)).until(() -> ioThread.get().getState() == Thread.State.TIMED_WAITING);
+            CountDownLatch ran = new CountDownLatch(1);
+            session.processTask(ran::countDown);
+            assertThat(ran.await(5, TimeUnit.SECONDS)).as("task %d ran before the park expired", i).isTrue();
+        }
+    }
+
+    /**
+     * An {@code onRead} that holds the IO thread for as long as the test tells it to, and does not let an interrupt
+     * cut it short - a callback doing real work, blocked on a lock or a disk write, behaves this way.
+     */
+    private static class BlockingListener implements IOEventsListener {
+        private final CountDownLatch entered;
+        private final CountDownLatch release;
+        private final AtomicBoolean callbackReturned = new AtomicBoolean();
+
+        BlockingListener(CountDownLatch entered, CountDownLatch release) {
+            this.entered = entered;
+            this.release = release;
+        }
+
+        @Override
+        public void onRead(IOSession session, ByteBuffer message, long localReceiveTimeInNanos) {
+            message.position(message.limit());
+            entered.countDown();
+            boolean interrupted = false;
+            while (true) {
+                try {
+                    release.await();
+                    break;
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            callbackReturned.set(true);
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static class CountingListener implements IOEventsListener {

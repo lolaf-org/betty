@@ -18,6 +18,7 @@ package org.lolaf.betty.api.settings;
 import org.lolaf.betty.api.io.IOEventsListener;
 import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.io.IOWriter;
+import org.lolaf.betty.api.io.ReadBufferGrowthStrategy;
 import lombok.Builder;
 import lombok.Getter;
 
@@ -39,11 +40,24 @@ public class IOSettings {
      */
     public static final int DEFAULT_TASKS_RING_BUFFER_SIZE = 32;
     /**
-     * Byte buffer allocated size when reading data from the socket, a too small value will not allow to read large messages
-     * from network in one single call by the IO selector
+     * Initial size of the read buffer. A larger message is still received whole, the buffer growing up to
+     * {@link #maxReadBufferSize}, so size it for the usual message rather than the largest.
      */
     @Builder.Default
     private final int readBufferSize = 8 * 1024;
+
+    /**
+     * Size the read buffer may grow to for a message larger than {@link #readBufferSize}, at least that size; equal
+     * to it disables growth. Bounds the memory a single peer can make a session hold.
+     */
+    @Builder.Default
+    private final int maxReadBufferSize = 1024 * 1024;
+
+    /**
+     * How the read buffer grows towards {@link #maxReadBufferSize}; unused when the two sizes are equal.
+     */
+    @Builder.Default
+    private final ReadBufferGrowthStrategy readBufferGrowthStrategy = ReadBufferGrowthStrategy.DOUBLING;
 
     /**
      * Is the read buffer a direct buffer or a normal one

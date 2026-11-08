@@ -92,6 +92,11 @@ public interface IOEventsListener {
 
     /**
      * Indicates data can be read from the socket, buffer will be compacted automatically after each call to this method
+     * <p>
+     * Leave an incomplete message unconsumed: it is handed back with the bytes that follow. When it fills the buffer,
+     * the buffer grows by {@link IOSettings#getReadBufferGrowthStrategy()} up to
+     * {@link IOSettings#getMaxReadBufferSize()}, past which the session ends with a {@link ReadBufferFullException}.
+     * The same applies to bytes held back on purpose, so do not rely on the buffer's identity or capacity across calls.
      *
      * @param session                 the io session
      * @param message                 the message to read

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" child.project.url.inherit.append.path="false">
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+         child.project.url.inherit.append.path="false">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.lolaf.betty</groupId>
@@ -48,7 +50,7 @@
              appear inside an XML comment, which is why the flag is named in prose here.) -->
         <maven.compiler.release>11</maven.compiler.release>
 
-        <ringos.version>0.9.1</ringos.version>
+        <ringos.version>0.9.2</ringos.version>
 
         <slf4j.version>2.0.17</slf4j.version>
         <jmh.version>1.37</jmh.version>
@@ -73,7 +75,7 @@
         <!-- Appended to what maven-release-plugin passes to its forked builds. It exists because
              <arguments> below is set in the pom, which makes -Darguments= on the command line a
              silently ignored no-op. -->
-        <release.extraArguments />
+        <release.extraArguments/>
         <lombok-maven-plugin.version>1.18.20.0</lombok-maven-plugin.version>
         <license-maven-plugin.version>5.1.2</license-maven-plugin.version>
         <versions-maven-plugin.version>2.23.0</versions-maven-plugin.version>
@@ -94,7 +96,7 @@
             -Xshare:off
             ${surefire.argLine.extra}
         </surefire.argLine>
-        <surefire.argLine.extra />
+        <surefire.argLine.extra/>
         <automatic.module.name>org.lolaf.betty.MODULE.NAME.NOT.SET</automatic.module.name>
         <license.source.dir>${project.basedir}/..</license.source.dir>
         <delombok.skip>false</delombok.skip>
@@ -110,7 +112,8 @@
         <module>module-path-test</module>
     </modules>
 
-    <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false" child.scm.url.inherit.append.path="false">
+    <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false"
+         child.scm.url.inherit.append.path="false">
         <connection>scm:git:https://github.com/lolaf-org/betty.git</connection>
         <developerConnection>scm:git:https://github.com/lolaf-org/betty.git</developerConnection>
         <url>https://github.com/lolaf-org/betty</url>
@@ -298,7 +301,8 @@
                         <useReleaseProfile>false</useReleaseProfile>
                         <arguments>-T1C ${release.extraArguments}</arguments>
                         <scmReleaseCommitComment>release @{releaseLabel}</scmReleaseCommitComment>
-                        <scmDevelopmentCommitComment>resume development after @{releaseLabel}</scmDevelopmentCommitComment>
+                        <scmDevelopmentCommitComment>resume development after @{releaseLabel}
+                        </scmDevelopmentCommitComment>
                     </configuration>
                 </plugin>
             </plugins>
@@ -434,15 +438,23 @@
                             <rules>
                                 <requireMavenVersion>
                                     <version>[3.6.3,)</version>
-                                    <message>Maven 3.6.3 or newer is required: older versions ignore the child.*.inherit.append.path attributes the published poms rely on.</message>
+                                    <message>Maven 3.6.3 or newer is required: older versions ignore the
+                                        child.*.inherit.append.path attributes the published poms rely on.
+                                    </message>
                                 </requireMavenVersion>
                                 <requireJavaVersion>
                                     <version>[17,)</version>
-                                    <message>Building betty needs JDK 17 or newer (JUnit 6 requires 17, and --enable-native-access is rejected by 16 and older). The library itself still runs on JDK 11.</message>
+                                    <message>Building betty needs JDK 17 or newer (JUnit 6 requires 17, and
+                                        --enable-native-access is rejected by 16 and older). The library itself still
+                                        runs on JDK 11.
+                                    </message>
                                 </requireJavaVersion>
                                 <requireReleaseDeps>
                                     <onlyWhenRelease>true</onlyWhenRelease>
-                                    <message>A release may not depend on a SNAPSHOT: Central rejects the bundle, and the artifact would be unbuildable once that snapshot moved. Betty cannot be released until ringos is.</message>
+                                    <message>A release may not depend on a SNAPSHOT: Central rejects the bundle, and the
+                                        artifact would be unbuildable once that snapshot moved. Betty cannot be released
+                                        until ringos is.
+                                    </message>
                                 </requireReleaseDeps>
                             </rules>
                         </configuration>
