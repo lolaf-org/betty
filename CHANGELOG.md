@@ -23,6 +23,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ### Changed
 
+- **A client connects as soon as it starts.** Its first connection attempt used to wait one `connectionRetry`, 1 s by
+  default; that delay now applies only between attempts.
 - **A write or task sent from another thread now wakes an IO thread that is parked by `BackoffIdleStrategy`.** With
   `IdleStrategySelectStrategy`, such a write used to wait for the rest of the park, up to 1 ms with the defaults; it is
   now picked up at once. Incoming data still waits for the park to end.
