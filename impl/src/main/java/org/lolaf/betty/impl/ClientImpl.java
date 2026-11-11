@@ -109,7 +109,7 @@ class ClientImpl implements Client {
         ioWorkersGroup.start();
         connectAddressIterator = clientBuilder.getConnectAddresses().iterator();
         nextConnectAddress = null;
-        requestConnect();
+        scheduledExecutorService.execute(() -> scheduleConnectTaskIfNone(0));
         log.info("IO client '{}' is started", clientBuilder.getId());
         return this;
     }
@@ -156,11 +156,15 @@ class ClientImpl implements Client {
     }
 
     private void scheduleConnectTaskIfNone() {
+        scheduleConnectTaskIfNone(clientBuilder.getConnectionRetry().toMillis());
+    }
+
+    private void scheduleConnectTaskIfNone(long delayMillis) {
         if (!started.get() || connectedSession.get() != null || (connectTask != null && !connectTask.isDone())) {
             return;
         }
         connectTask = scheduledExecutorService
-                .schedule(this::connectTask, clientBuilder.getConnectionRetry().toMillis(), TimeUnit.MILLISECONDS);
+                .schedule(this::connectTask, delayMillis, TimeUnit.MILLISECONDS);
     }
 
     private void cancelConnectTask() {

@@ -20,9 +20,15 @@ matching `[x.y.z]:` link definition at the foot of the file.
 - **`IOSettings.readBufferGrowthStrategy` chooses how the read buffer grows**, doubling by default. It sees the start
   of the incomplete message, so a strategy that knows your framing can read the message length and size the buffer for
   it in one step.
+- **A warning at startup when the JDK selector will allocate on every read.** On Linux and macOS, the JDK selector
+  allocates a small object for each ready socket whose file descriptor is above 127, which any busy process reaches.
+  Betty now logs this once, with the process's descriptor limit, unless `-XX:AutoBoxCacheMax` is set to widen the
+  cache that avoids it.
 
 ### Changed
 
+- **A client connects as soon as it starts.** Its first connection attempt used to wait one `connectionRetry`, 1 s by
+  default; that delay now applies only between attempts.
 - **A write or task sent from another thread now wakes an IO thread that is parked by `BackoffIdleStrategy`.** With
   `IdleStrategySelectStrategy`, such a write used to wait for the rest of the park, up to 1 ms with the defaults; it is
   now picked up at once. Incoming data still waits for the park to end.

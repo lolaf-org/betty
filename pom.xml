@@ -86,6 +86,7 @@
         <surefire.argLine>
             -XX:ContendedPaddingWidth=64
             -XX:-RestrictContended
+            -XX:AutoBoxCacheMax=65536
             --enable-native-access=ALL-UNNAMED
             --add-opens java.base/jdk.internal.misc=ALL-UNNAMED
             --add-opens java.base/java.lang=ALL-UNNAMED

@@ -53,8 +53,7 @@ public class ClientBuilder extends BaseBuilder implements InstanceProvider<Clien
     private final SSLSettings SSLSettings;
 
     /**
-     * Delay between connection attempts, and before the first one - {@link Client#start()} arms the attempt rather
-     * than making it, so this is also how long a start takes to reach the network.
+     * Delay between connection attempts; {@link Client#start()} makes the first one at once.
      */
     @Builder.Default
     private final Duration connectionRetry = Duration.ofSeconds(1);
