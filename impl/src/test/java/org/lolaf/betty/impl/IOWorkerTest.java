@@ -24,6 +24,7 @@ import org.lolaf.betty.api.io.IOSession;
 import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
 import org.lolaf.betty.api.settings.SSLSettings;
 import org.lolaf.betty.api.ss.IdleStrategySelectStrategy;
+import org.lolaf.betty.api.ss.WakeupSelectStrategy;
 import org.lolaf.ringos.Deadline;
 import org.lolaf.ringos.idling.*;
 
@@ -180,6 +181,35 @@ class IOWorkerTest {
 
         assertThat(disconnected.getCount()).isZero();
         assertThat(peer.read(ByteBuffer.allocate(1))).as("the peer sees the socket closed").isEqualTo(-1);
+    }
+
+    /**
+     * One command per cycle and a select that never times out: a registration left for a later cycle is only run if
+     * the worker wakes itself for it.
+     */
+    @Test
+    void registrationsLeftForALaterCycleAreStillRun() throws IOException {
+        worker = new IOWorkerImpl("one-command-worker", IOWorkersGroupSettings.builder().id("one-command-worker").build(),
+                IOWorkersGroupSettings.IOThreadGroup.builder().selectStrategy(new WakeupSelectStrategy(60_000)).build(), 1);
+        worker.start();
+        List<SocketChannel> sockets = new ArrayList<>();
+        List<SocketChannel> peers = new ArrayList<>();
+        try {
+            for (int i = 0; i < 10; i++) {
+                sockets.add(SocketChannel.open(peerListener.getLocalAddress()));
+                peers.add(peerListener.accept());
+            }
+            for (SocketChannel socket : sockets) {
+                worker.register(true, socket, clientBuilder(new CountingListener()));
+            }
+
+            await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == sockets.size());
+        } finally {
+            worker.stop(Deadline.immediate());
+            for (SocketChannel peer : peers) {
+                close(peer);
+            }
+        }
     }
 
     @Test

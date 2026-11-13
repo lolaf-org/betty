@@ -53,6 +53,9 @@ class ServerImpl extends Startable.SimpleStartable<Server> implements Server {
 
     private ServerImpl(ServerBuilder serverBuilder) {
         IOSessionImpl.checkReadBufferSizes(serverBuilder.getIoSettings());
+        if (serverBuilder.getMaxSessions() < 1) {
+            throw new IllegalArgumentException("maxSessions " + serverBuilder.getMaxSessions() + " is not positive");
+        }
         this.bindAddress = serverBuilder.getBindAddress();
         this.ioWorkersGroup = Optional.ofNullable(serverBuilder.getIoWorkersGroup())
                 .orElseGet(() -> IOWorkersGroupSettings.builder()
@@ -159,7 +162,7 @@ class ServerImpl extends Startable.SimpleStartable<Server> implements Server {
             serverSocket.configureBlocking(false);
             acceptorWorkersGroup.start();
             ioWorkersGroup.start();
-            acceptKey = serverSocket.register(getSocketAcceptSelector().orElseThrow(), SelectionKey.OP_ACCEPT, builder);
+            acceptKey = serverSocket.register(getSocketAcceptSelector().orElseThrow(), SelectionKey.OP_ACCEPT, new AcceptedConnections(builder));
         } catch (IOException ex) {
             throw new StartStopException(ex);
         }

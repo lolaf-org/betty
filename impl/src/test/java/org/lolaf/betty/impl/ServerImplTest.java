@@ -18,6 +18,7 @@ package org.lolaf.betty.impl;
 
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Named;
+import org.junit.jupiter.api.Test;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -38,6 +39,7 @@ import org.lolaf.ringos.Deadline;
 import javax.net.ssl.SSLHandshakeException;
 import java.net.Socket;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -49,6 +51,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.awaitility.Awaitility.with;
 import static org.mockito.Mockito.*;
@@ -88,6 +91,38 @@ class ServerImplTest extends AbstractTest {
             peer.setSoTimeout(5_000);
             assertThat(peer.getInputStream().read()).as("the server closed the connection").isEqualTo(-1);
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("serversCreatingSessionsOnTheAcceptingThread")
+    void aServerHoldingItsMaxSessionsClosesNewConnectionsUntilOneCloses(ServerBuilder serverBuilder) throws Exception {
+        server = serverBuilder.toBuilder().maxSessions(1).build().newInstance();
+        server.start();
+        int port = serverBuilder.getBindAddress().getPort();
+
+        try (Socket held = new Socket("localhost", port); Socket refused = new Socket("localhost", port)) {
+            refused.setSoTimeout(5_000);
+            assertThat(refused.getInputStream().read()).as("the server closed the connection past its maximum").isEqualTo(-1);
+            assertThatIsKeptOpen(held);
+        }
+
+        await().untilAsserted(() -> {
+            try (Socket next = new Socket("localhost", port)) {
+                assertThatIsKeptOpen(next);
+            }
+        });
+    }
+
+    private static void assertThatIsKeptOpen(Socket socket) throws SocketException {
+        socket.setSoTimeout(200);
+        assertThatThrownBy(() -> socket.getInputStream().read()).isInstanceOf(SocketTimeoutException.class);
+    }
+
+    @Test
+    void aMaxSessionsBelowOneIsRefused() {
+        ServerBuilder serverBuilder = getTestServerBuilder().toBuilder().maxSessions(0).build();
+
+        assertThatThrownBy(serverBuilder::newInstance).isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

@@ -63,6 +63,13 @@ public class ServerBuilder extends BaseBuilder implements InstanceProvider<Serve
     @Builder.Default
     private final RemoteSessionsFilter remoteSessionsFilter = (remoteAddress, remoteSessionCertificate) -> true;
 
+    /**
+     * The most connections the server holds open at once, counting those still in their TLS handshake. Past it, a new
+     * connection is closed as soon as it is accepted, which bounds what a flood of connections can take.
+     */
+    @Builder.Default
+    private final int maxSessions = 1024;
+
     @Override
     public Server newInstance() {
         return InstanceProvider.getSpiInstance(this, Server.ServerFactory.class);

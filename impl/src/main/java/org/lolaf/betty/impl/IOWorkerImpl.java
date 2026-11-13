@@ -81,6 +81,8 @@ class IOWorkerImpl implements IOWorker {
     private final Thread ioWorkerThread;
     private final ExponentialMovingAverage loadEma;
     private final RingBuffer<IOWorkerCommand> pendingCommands;
+    // a burst of commands, such as a flood of new connections, still leaves the registered sessions their IO
+    private final int commandsPerCycle;
     // only ever used under the pendingCommands lock, so by one thread at a time
     private final RetryStrategy commandsRetryStrategy;
     @Getter
@@ -98,6 +100,12 @@ class IOWorkerImpl implements IOWorker {
     private Runnable selectorWakeupIfNeeded;
 
     IOWorkerImpl(String name, IOWorkersGroupSettings ioWorkersGroupSettings, IOWorkersGroupSettings.IOThreadGroup threadGroup) {
+        this(name, ioWorkersGroupSettings, threadGroup, PENDING_COMMANDS_CAPACITY);
+    }
+
+    IOWorkerImpl(String name, IOWorkersGroupSettings ioWorkersGroupSettings, IOWorkersGroupSettings.IOThreadGroup threadGroup,
+                 int commandsPerCycle) {
+        this.commandsPerCycle = commandsPerCycle;
         this.registeredSessions = Collections.synchronizedSet(new HashSet<>());
         this.name = "IO-worker-" + name;
         this.group = threadGroup.getName();
@@ -491,9 +499,7 @@ class IOWorkerImpl implements IOWorker {
             }
             if (hasPendingCommands) {
                 hasPendingCommands = false;
-                while (pendingCommands.poll(this::onIOWorkerCommand)) {
-                    // drain
-                }
+                runPendingCommands();
             }
             if (trackReceiveTime) {
                 localReceiveTime = RECEIVE_TIME_NOT_TAKEN;
@@ -512,6 +518,16 @@ class IOWorkerImpl implements IOWorker {
             log.info("Failed to call Selector selectNow to finalize IOWorker", e);
         }
         log.info("IO Worker thread {} stopped", Thread.currentThread().getName());
+    }
+
+    private void runPendingCommands() {
+        for (int i = 0; i < commandsPerCycle; i++) {
+            if (!pendingCommands.poll(this::onIOWorkerCommand)) {
+                return;
+            }
+        }
+        // the rest waits for the next cycle, which must not park on it
+        signalPendingCommands();
     }
 
     private void runStats() {
@@ -640,9 +656,19 @@ class IOWorkerImpl implements IOWorker {
 
     private void acceptIOSession(SelectionKey key) throws IOException {
         long startTime = System.nanoTime();
-        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
-        SocketChannel socket = serverSocketChannel.accept();
-        ServerBuilder serverBuilder = (ServerBuilder) key.attachment();
+        SocketChannel socket = ((ServerSocketChannel) key.channel()).accept();
+        AcceptedConnections connections = (AcceptedConnections) key.attachment();
+        if (socket != null) {
+            if (connections.admit(socket)) {
+                dispatchAccepted(socket, connections.getServerBuilder());
+            } else {
+                closeQuietly(socket);
+            }
+        }
+        acceptCpuTimeInNanos += System.nanoTime() - startTime;
+    }
+
+    private void dispatchAccepted(SocketChannel socket, ServerBuilder serverBuilder) throws IOException {
         IOWorker target = serverBuilder.getIoWorkersGroup().getNext(socket);
         if (target != this && serverBuilder.getServerSSLSettings() != null && serverBuilder.getAcceptorIoWorkerGroup() != null) {
             // a dedicated acceptor runs the handshake and the session moves once it is done, sparing the target's
@@ -656,7 +682,6 @@ class IOWorkerImpl implements IOWorker {
                 closeQuietly(socket);
             }
         }
-        acceptCpuTimeInNanos += System.nanoTime() - startTime;
     }
 
     @Override

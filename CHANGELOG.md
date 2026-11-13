@@ -26,9 +26,15 @@ matching `[x.y.z]:` link definition at the foot of the file.
   cache that avoids it.
 - **`IOWorker.connect`** connects a socket on the worker's IO thread and creates its session there. A failed attempt
   closes the socket and is reported to `IOEventsListener.onDisconnected` with a null session.
+- **`ServerBuilder.maxSessions` bounds the connections a server holds open, 1024 by default.** Connections still in
+  their TLS handshake count. Past it, a new connection is closed as soon as it is accepted, so a flood of connections
+  cannot take every socket and buffer the process has. A warning is logged when the server starts refusing. A server
+  that serves more than 1024 sessions must raise it.
 
 ### Changed
 
+- **A burst of new connections no longer holds up the sessions already served.** An IO thread now sets up a bounded
+  number of new connections between two rounds of reads and writes, instead of all the waiting ones.
 - **A client connects as soon as it starts.** Its first connection attempt used to wait one `connectionRetry`, 1 s by
   default; that delay now applies only between attempts.
 - **A write or task sent from another thread now wakes an IO thread that is parked by `BackoffIdleStrategy`.** With
