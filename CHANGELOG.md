@@ -24,6 +24,8 @@ matching `[x.y.z]:` link definition at the foot of the file.
   allocates a small object for each ready socket whose file descriptor is above 127, which any busy process reaches.
   Betty now logs this once, with the process's descriptor limit, unless `-XX:AutoBoxCacheMax` is set to widen the
   cache that avoids it.
+- **`IOWorker.connect`** connects a socket on the worker's IO thread and creates its session there. A failed attempt
+  closes the socket and is reported to `IOEventsListener.onDisconnected` with a null session.
 
 ### Changed
 
@@ -44,6 +46,11 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ### Fixed
 
+- **Stopping a client while it connects no longer fails with a `NullPointerException`** thrown from the JDK selector,
+  and no longer leaves the connecting socket open.
+- **A client tries its next address after any failed connection attempt.** An address that could not be resolved, or
+  a connection that failed with an error other than a refusal, used to stop the client from connecting again.
+- **A connection still in progress when its IO worker stops is now closed.** It used to stay open.
 - **A plain session no longer stalls on a message larger than its read buffer.** It used to stop delivering data
   without reporting any error.
 - **A connection the server could not set up is now closed.** When creating its session failed, for example on

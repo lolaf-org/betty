@@ -16,9 +16,11 @@
 package org.lolaf.betty.api.io;
 
 import org.lolaf.betty.api.BaseBuilder;
+import org.lolaf.betty.api.ClientBuilder;
 import org.lolaf.betty.api.Startable;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.List;
@@ -80,6 +82,19 @@ public interface IOWorker extends Startable<IOWorker> {
      * @throws IOException if this worker is not running, or if the registration fails when called from the IO thread
      */
     void register(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) throws IOException;
+
+    /**
+     * Connects a socket from this worker's IO thread, then creates its session there.
+     * <p>
+     * A failed attempt closes the socket and calls the listener's {@code onDisconnected} with a null session, so that
+     * a client can try its next address.
+     *
+     * @param socket        an unconnected socket
+     * @param address       the address to connect to
+     * @param clientBuilder the client settings the session is built from
+     * @throws IOException if this worker is not running
+     */
+    void connect(SocketChannel socket, InetSocketAddress address, ClientBuilder clientBuilder) throws IOException;
 
 
     /**

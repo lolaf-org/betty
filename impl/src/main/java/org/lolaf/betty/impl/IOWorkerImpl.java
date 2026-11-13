@@ -38,7 +38,6 @@ import org.lolaf.ringos.rb.RingBufferFactory;
 import javax.net.ssl.SSLHandshakeException;
 import java.io.EOFException;
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.nio.channels.*;
 import java.util.*;
@@ -302,6 +301,16 @@ class IOWorkerImpl implements IOWorker {
         return true;
     }
 
+    private boolean submitConnection(SocketChannel socket, InetSocketAddress address, ClientBuilder clientBuilder) {
+        synchronized (pendingCommands) {
+            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateConnection, socket, address, clientBuilder, commandsRetryStrategy())) {
+                return false;
+            }
+        }
+        signalPendingCommands();
+        return true;
+    }
+
     private RetryStrategy commandsRetryStrategy() {
         return Thread.currentThread() == ioWorkerThread ? NO_RETRY : commandsRetryStrategy;
     }
@@ -322,6 +331,9 @@ class IOWorkerImpl implements IOWorker {
             switch (cmd.type) {
                 case REGISTER:
                     registerInternal(cmd.clientSession, cmd.socket, cmd.baseBuilder);
+                    break;
+                case CONNECT:
+                    connectInternal(cmd.socket, cmd.address, (ClientBuilder) cmd.baseBuilder);
                     break;
                 case DETACH:
                     handleDetach(cmd);
@@ -348,6 +360,7 @@ class IOWorkerImpl implements IOWorker {
         try {
             switch (cmd.type) {
                 case REGISTER:
+                case CONNECT:
                     closeQuietly(cmd.socket);
                     break;
                 case DETACH:
@@ -429,6 +442,7 @@ class IOWorkerImpl implements IOWorker {
             while (pendingCommands.poll(this::onIOWorkerCommandAfterStop)) {
                 // drain
             }
+            closePendingConnections();
             stopRegisteredSessions();
         }
     }
@@ -438,6 +452,15 @@ class IOWorkerImpl implements IOWorker {
         commandsClosed = true;
         synchronized (pendingCommands) {
             // waits out a producer that read the flag before it was set, so its command is in the queue for the drain
+        }
+    }
+
+    private void closePendingConnections() {
+        // closing the selector deregisters a socket but leaves it open
+        for (SelectionKey key : selector.keys()) {
+            if (key.attachment() instanceof ClientBuilder) {
+                closeQuietly((SocketChannel) key.channel());
+            }
         }
     }
 
@@ -578,7 +601,7 @@ class IOWorkerImpl implements IOWorker {
         }
     }
 
-    private void connectIOSession(SelectionKey key) throws IOException {
+    private void connectIOSession(SelectionKey key) {
         long startTime = System.nanoTime();
         SocketChannel socket = (SocketChannel) key.channel();
         BaseBuilder baseBuilder = (BaseBuilder) key.attachment();
@@ -588,13 +611,31 @@ class IOWorkerImpl implements IOWorker {
             }
             if (socket.isConnectionPending()) {
                 socket.finishConnect();
-                register(true, socket, baseBuilder);
+                registerInternal(true, socket, baseBuilder);
             }
-        } catch (ConnectException e) {
-            // happens when calling finishConnect() and a client socket connection failed to establish
-            baseBuilder.getIoEventsListener().onDisconnected(null);
+        } catch (IOException e) {
+            onConnectionFailed(socket, baseBuilder, e);
         }
         connectCpuTimeInNanos += System.nanoTime() - startTime;
+    }
+
+    private void connectInternal(SocketChannel socket, InetSocketAddress address, ClientBuilder clientBuilder) {
+        try {
+            socket.configureBlocking(false);
+            if (socket.connect(address)) {
+                registerInternal(true, socket, clientBuilder);
+            } else {
+                socket.register(selector, SelectionKey.OP_CONNECT, clientBuilder);
+            }
+        } catch (IOException | RuntimeException e) {
+            onConnectionFailed(socket, clientBuilder, e);
+        }
+    }
+
+    private void onConnectionFailed(SocketChannel socket, BaseBuilder baseBuilder, Exception e) {
+        log.debug("Connecting socket {} failed on IO worker {}", socket, name, e);
+        closeQuietly(socket);
+        baseBuilder.getIoEventsListener().onDisconnected(null);
     }
 
     private void acceptIOSession(SelectionKey key) throws IOException {
@@ -616,6 +657,17 @@ class IOWorkerImpl implements IOWorker {
             }
         }
         acceptCpuTimeInNanos += System.nanoTime() - startTime;
+    }
+
+    @Override
+    public void connect(SocketChannel socket, InetSocketAddress address, ClientBuilder clientBuilder) throws IOException {
+        if (Thread.currentThread() == ioWorkerThread) {
+            connectInternal(socket, address, clientBuilder);
+            return;
+        }
+        if (!running.get() || !submitConnection(socket, address, clientBuilder)) {
+            throw new IOException("IO worker " + name + " is not running");
+        }
     }
 
     @Override
@@ -751,7 +803,7 @@ class IOWorkerImpl implements IOWorker {
     }
 
     private enum CommandType {
-        REGISTER, DETACH, ATTACH
+        REGISTER, CONNECT, DETACH, ATTACH
     }
 
     @Value
@@ -768,6 +820,7 @@ class IOWorkerImpl implements IOWorker {
         private CompletableFuture<Void> resultFuture;
         private boolean clientSession;
         private SocketChannel socket;
+        private InetSocketAddress address;
         private BaseBuilder baseBuilder;
 
         void translateMigration(CommandType type, IOWorkerImpl otherWorker, IOSessionImpl session, CompletableFuture<Void> resultFuture) {
@@ -784,12 +837,20 @@ class IOWorkerImpl implements IOWorker {
             this.baseBuilder = baseBuilder;
         }
 
+        void translateConnection(SocketChannel socket, InetSocketAddress address, ClientBuilder clientBuilder) {
+            this.type = CommandType.CONNECT;
+            this.socket = socket;
+            this.address = address;
+            this.baseBuilder = clientBuilder;
+        }
+
         void clean() {
             type = null;
             session = null;
             otherWorker = null;
             resultFuture = null;
             socket = null;
+            address = null;
             baseBuilder = null;
         }
     }

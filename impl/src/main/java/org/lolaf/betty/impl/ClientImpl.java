@@ -20,13 +20,12 @@ import org.lolaf.betty.api.Client;
 import org.lolaf.betty.api.ClientBuilder;
 import org.lolaf.betty.api.io.IOEventsListener;
 import org.lolaf.betty.api.io.IOSession;
-import org.lolaf.betty.api.io.IOWorker;
 import org.lolaf.betty.api.io.IOWorkersGroup;
 import org.lolaf.betty.api.settings.IOWorkersGroupSettings;
 import org.lolaf.ringos.Deadline;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.Optional;
@@ -193,20 +192,28 @@ class ClientImpl implements Client {
             scheduleConnectTaskIfNone();
             return;
         }
+        SocketChannel clientSocket = null;
         try {
             InetSocketAddress connectAddress = nextConnectAddress;
             nextConnectAddress = null;
             log.debug("Connecting '{}' to {}", clientBuilder.getId(), connectAddress);
-            SocketChannel clientSocket = SocketChannel.open();
-            clientSocket.configureBlocking(false);
-            IOWorker ioWorker = ioWorkersGroup.getNext(clientSocket);
-            if (!clientSocket.connect(connectAddress)) {
-                clientSocket.register(ioWorker.getSelector(), SelectionKey.OP_CONNECT, clientBuilder);
-            } else {
-                ioWorker.register(true, clientSocket, clientBuilder);
-            }
+            clientSocket = SocketChannel.open();
+            ioWorkersGroup.getNext(clientSocket).connect(clientSocket, connectAddress, clientBuilder);
         } catch (Exception e) {
             log.info("Failed to process connect task", e);
+            closeQuietly(clientSocket);
+            scheduleConnectTaskIfNone();
+        }
+    }
+
+    private void closeQuietly(SocketChannel socket) {
+        if (socket == null) {
+            return;
+        }
+        try {
+            socket.close();
+        } catch (IOException e) {
+            log.info("Client '{}' failed to close socket {}", clientBuilder.getId(), socket, e);
         }
     }
 

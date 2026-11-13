@@ -117,6 +117,22 @@ class ClientImplTest extends AbstractTest {
         assertThat(disconnections).hasValue(1);
     }
 
+    /**
+     * Resolving an address fails before any connection is attempted: the client used to stop there instead of trying
+     * its next address.
+     */
+    @Test
+    void anAddressThatCannotBeResolvedIsSkippedForTheNextOne() {
+        ClientBuilder clientBuilder = getTestClientBuilder().toBuilder()
+                .clearConnectAddresses()
+                .connectAddress(InetSocketAddress.createUnresolved("unresolved.invalid", port))
+                .connectAddress(new InetSocketAddress("localhost", port))
+                .connectionRetry(Duration.ofMillis(100))
+                .build();
+
+        setupTestEnvAndWaitForConnections(clientBuilder, getTestServerBuilder());
+    }
+
     @ParameterizedTest
     @MethodSource("getTestParams")
     void testEmbeddedSchedulerService(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {

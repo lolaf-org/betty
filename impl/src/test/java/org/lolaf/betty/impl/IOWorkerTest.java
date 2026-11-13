@@ -183,6 +183,97 @@ class IOWorkerTest {
     }
 
     @Test
+    void aSocketConnectedByTheWorkerBecomesASession() throws IOException {
+        startWorker("connect-worker");
+        registeredSocket = SocketChannel.open();
+
+        worker.connect(registeredSocket, (InetSocketAddress) peerListener.getLocalAddress(), clientBuilder(new CountingListener()));
+        peer = peerListener.accept();
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == 1);
+    }
+
+    @Test
+    void anAddressThatCannotBeResolvedClosesTheSocketAndReportsTheFailure() throws Exception {
+        assertAFailedConnectionIsClosedAndReported(InetSocketAddress.createUnresolved("unresolved.invalid", 1));
+    }
+
+    @Test
+    void aRefusedConnectionClosesTheSocketAndReportsTheFailure() throws Exception {
+        InetSocketAddress closedPort = (InetSocketAddress) peerListener.getLocalAddress();
+        peerListener.close();
+
+        assertAFailedConnectionIsClosedAndReported(closedPort);
+    }
+
+    private void assertAFailedConnectionIsClosedAndReported(InetSocketAddress address) throws Exception {
+        startWorker("failed-connect-worker");
+        CompletableFuture<IOSession> failure = new CompletableFuture<>();
+        registeredSocket = SocketChannel.open();
+
+        worker.connect(registeredSocket, address, clientBuilder(new CountingListener() {
+            @Override
+            public void onDisconnected(IOSession session) {
+                failure.complete(session);
+            }
+        }));
+
+        assertThat(failure.get(10, TimeUnit.SECONDS)).as("no session was ever created").isNull();
+        assertThat(registeredSocket.isOpen()).isFalse();
+    }
+
+    @Test
+    void aConnectionStillPendingWhenTheWorkerStopsIsClosed() throws IOException {
+        startWorker("pending-connect-worker");
+        List<SocketChannel> backlogFillers = fillBacklog();
+        try {
+            registeredSocket = SocketChannel.open();
+            worker.connect(registeredSocket, (InetSocketAddress) peerListener.getLocalAddress(), clientBuilder(new CountingListener()));
+            await().atMost(Duration.ofSeconds(10)).until(registeredSocket::isConnectionPending);
+
+            worker.stop(Deadline.immediate());
+
+            assertThat(registeredSocket.isOpen()).isFalse();
+        } finally {
+            for (SocketChannel filler : backlogFillers) {
+                close(filler);
+            }
+        }
+    }
+
+    @Test
+    void aConnectionAfterTheWorkerStoppedIsRefused() throws IOException {
+        startWorker("stopped-connect-worker").stop(Deadline.immediate());
+        registeredSocket = SocketChannel.open();
+        InetSocketAddress address = (InetSocketAddress) peerListener.getLocalAddress();
+
+        assertThatThrownBy(() -> worker.connect(registeredSocket, address, clientBuilder(new CountingListener())))
+                .isInstanceOf(IOException.class);
+    }
+
+    /**
+     * Rebinds the listener with a backlog of one and never accepts: once its queue is full, the kernel drops further
+     * connection requests, so a new connection stays pending.
+     */
+    private List<SocketChannel> fillBacklog() throws IOException {
+        peerListener.close();
+        peerListener = ServerSocketChannel.open();
+        peerListener.bind(new InetSocketAddress("localhost", 0), 1);
+        List<SocketChannel> fillers = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            SocketChannel filler = SocketChannel.open();
+            filler.configureBlocking(false);
+            filler.connect(peerListener.getLocalAddress());
+            fillers.add(filler);
+        }
+        return fillers;
+    }
+
+    private static ClientBuilder clientBuilder(IOEventsListener listener) {
+        return ClientBuilder.builder().id("io-worker-test").ioEventsListener(listener).build();
+    }
+
+    @Test
     void aTaskProducerBlockedOnAFullQueueIsReleasedByTheDisconnection() throws Exception {
         AtomicInteger refused = new AtomicInteger();
         assertEveryProducedRequestIsAnsweredOnDisconnection((session, requests) -> {
