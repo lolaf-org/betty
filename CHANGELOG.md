@@ -9,7 +9,7 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
-## [Unreleased]
+## [0.9.4] - 2026-11-16
 
 ### Added
 
@@ -171,5 +171,8 @@ depends on [ringos](https://github.com/lolaf-org/ringos) and SLF4J and nothing e
   not time an operation returns a constant and no clock call is made for it, so measurement is genuinely free when it
   is off. A receive timestamp is handed to `onRead` under its own setting.
 
+[0.9.4]: https://github.com/lolaf-org/betty/releases/tag/v0.9.4
+[0.9.3]: https://github.com/lolaf-org/betty/releases/tag/v0.9.3
+[0.9.2]: https://github.com/lolaf-org/betty/releases/tag/v0.9.2
 [0.9.1]: https://github.com/lolaf-org/betty/releases/tag/v0.9.1
 [0.9.0]: https://github.com/lolaf-org/betty/releases/tag/v0.9.0
