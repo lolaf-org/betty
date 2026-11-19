@@ -43,6 +43,7 @@ import java.nio.channels.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -299,6 +300,24 @@ class IOWorkerImpl implements IOWorker {
         return true;
     }
 
+    /**
+     * Disconnects the session on this worker's next cycle whatever its socket's state: a disconnection queued behind
+     * its writes waits for the socket to take them, which a peer that stopped reading never lets happen.
+     *
+     * @param disconnection counted down once the session is disconnected
+     * @return false when the command queue refused it, the worker stopping or its queue full
+     */
+    boolean submitDisconnection(IOSessionImpl session, CountDownLatch disconnection) {
+        synchronized (pendingCommands) {
+            if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateDisconnection, session, disconnection,
+                    commandsRetryStrategy())) {
+                return false;
+            }
+        }
+        signalPendingCommands();
+        return true;
+    }
+
     private boolean submitRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
         synchronized (pendingCommands) {
             if (commandsClosed || !pendingCommands.offerRetrying(IOWorkerCommand::translateRegistration, clientSession, socket, baseBuilder, commandsRetryStrategy())) {
@@ -349,15 +368,20 @@ class IOWorkerImpl implements IOWorker {
                 case ATTACH:
                     handleAttach(cmd);
                     break;
+                case DISCONNECT:
+                    handleDisconnect(cmd);
+                    break;
                 default:
                     throw new IllegalStateException("Unhandled command " + cmd.type);
             }
         } catch (Exception t) {
             if (cmd.resultFuture != null) {
                 cmd.resultFuture.completeExceptionally(t);
-            } else {
+            } else if (cmd.socket != null) {
                 log.error("Failed to register socket {} on {}", cmd.socket, name, t);
                 closeQuietly(cmd.socket);
+            } else {
+                log.error("Failed to run {} on {}", cmd.type, name, t);
             }
         } finally {
             cmd.clean();
@@ -378,6 +402,10 @@ class IOWorkerImpl implements IOWorker {
                 case ATTACH:
                     cmd.resultFuture.completeExceptionally(stoppedException());
                     returnToOrigin(cmd.session, cmd.otherWorker);
+                    break;
+                case DISCONNECT:
+                    // the session is still registered here: stopRegisteredSessions closes it next
+                    cmd.disconnection.countDown();
                     break;
                 default:
                     throw new IllegalStateException("Unhandled command " + cmd.type);
@@ -413,6 +441,15 @@ class IOWorkerImpl implements IOWorker {
         if (!command.otherWorker.submitMigration(CommandType.ATTACH, session, this, command.resultFuture)) {
             attach(session);
             command.resultFuture.completeExceptionally(command.otherWorker.stoppedException());
+        }
+    }
+
+    private void handleDisconnect(IOWorkerCommand command) {
+        if (registeredSessions.contains(command.session)) {
+            command.session.flushThenDisconnect(command.disconnection);
+        } else {
+            // migrating: only the session's own queue follows it to its next worker
+            command.session.queueDisconnection(command.disconnection);
         }
     }
 
@@ -828,7 +865,7 @@ class IOWorkerImpl implements IOWorker {
     }
 
     private enum CommandType {
-        REGISTER, CONNECT, DETACH, ATTACH
+        REGISTER, CONNECT, DETACH, ATTACH, DISCONNECT
     }
 
     @Value
@@ -843,6 +880,7 @@ class IOWorkerImpl implements IOWorker {
         private IOWorkerImpl otherWorker;
         private IOSessionImpl session;
         private CompletableFuture<Void> resultFuture;
+        private CountDownLatch disconnection;
         private boolean clientSession;
         private SocketChannel socket;
         private InetSocketAddress address;
@@ -853,6 +891,12 @@ class IOWorkerImpl implements IOWorker {
             this.otherWorker = otherWorker;
             this.session = session;
             this.resultFuture = resultFuture;
+        }
+
+        void translateDisconnection(IOSessionImpl session, CountDownLatch disconnection) {
+            this.type = CommandType.DISCONNECT;
+            this.session = session;
+            this.disconnection = disconnection;
         }
 
         void translateRegistration(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder) {
@@ -874,6 +918,7 @@ class IOWorkerImpl implements IOWorker {
             session = null;
             otherWorker = null;
             resultFuture = null;
+            disconnection = null;
             socket = null;
             address = null;
             baseBuilder = null;

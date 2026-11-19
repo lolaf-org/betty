@@ -132,6 +132,9 @@ public interface IOSession extends IOWriter {
      * Called from {@link IOEventsListener#onRead}, the connection closes once {@code onRead} returns: the rest of that
      * callback still runs on an open session, {@link IOEventsListener#onDisconnected} is never called from inside it,
      * and {@code onRead} is not called again, not even for TLS records that arrived in the same read.
+     * <p>
+     * Once the deadline has passed, what the socket does not take is abandoned and its senders are told: a peer that
+     * stopped reading does not keep the session open.
      *
      * @param stopDeadline time to wait for flushing all message to be sent before closing the session
      */

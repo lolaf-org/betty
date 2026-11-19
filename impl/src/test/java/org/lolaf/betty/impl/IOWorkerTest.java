@@ -68,6 +68,7 @@ class IOWorkerTest {
      * Deliberately generous, so that a stop waiting it out is unmistakable rather than a slow test.
      */
     private static final Duration GENEROUS_DEADLINE = Duration.ofSeconds(4);
+    private static final int SMALL_SOCKET_BUFFER = 4096;
 
     private ServerSocketChannel peerListener;
     private SocketChannel peer;
@@ -363,6 +364,141 @@ class IOWorkerTest {
         producer.join(10_000);
         assertThat(producer.isAlive()).as("the producer is released").isFalse();
         assertThat(refused).hasValue(requests);
+    }
+
+    /**
+     * The socket full and writes queued behind it, the disconnection used to queue behind them too and wait for a
+     * peer that never read: the stop then took 30 seconds and left the session open.
+     */
+    @Test
+    void aStopClosesASessionWhosePeerStoppedReadingOnceItsDeadlinePassed() throws Exception {
+        rebindWithoutReceiveBufferAutotuning();
+        startWorker("unread-peer-worker");
+        CountDownLatch disconnected = new CountDownLatch(1);
+        IOSession session = registerSession(new IOEventsListener() {
+            @Override
+            public void onRead(IOSession ioSession, ByteBuffer message, long localReceiveTimeInNanos) {
+                message.position(message.limit());
+            }
+
+            @Override
+            public void onDisconnected(IOSession ioSession) {
+                disconnected.countDown();
+            }
+        });
+        registeredSocket.setOption(StandardSocketOptions.SO_SNDBUF, SMALL_SOCKET_BUFFER);
+        AtomicInteger abandoned = new AtomicInteger();
+        sendUntilThePeerStopsTakingWrites(session, abandoned);
+
+        long start = System.nanoTime();
+        session.stop(Deadline.of(Duration.ofMillis(200)));
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(GENEROUS_DEADLINE);
+        assertThat(disconnected.getCount()).as("disconnected when stop returns").isZero();
+        assertThat(registeredSocket.isOpen()).isFalse();
+        assertThat(abandoned).as("the writes left are reported failed").hasPositiveValue();
+    }
+
+    @Test
+    void anImmediateStopStillSendsWhatWasQueuedToAPeerThatReads() throws Exception {
+        startWorker("reading-peer-worker");
+        IOSession session = registerSession(new CountingListener());
+        for (int i = 0; i < 100; i++) {
+            session.send(ByteBuffer.allocate(Long.BYTES).putLong(i), false);
+        }
+
+        session.stop(Deadline.immediate());
+
+        assertThat(readUntilClosed(peer).get(10, TimeUnit.SECONDS)).isEqualTo(100 * Long.BYTES);
+    }
+
+    /**
+     * The IO thread busy when the stop comes, its disconnection command runs before the socket reports writable: it
+     * writes the queue itself, then disconnects, and the IO thread carries on.
+     */
+    @Test
+    void aStopReachingABusyIOThreadSendsWhatPrecedesItAndLeavesTheThreadRunning() throws Exception {
+        startWorker("busy-worker");
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        IOSession session = registerSession((ioSession, message, localReceiveTimeInNanos) -> {
+            message.position(message.limit());
+            holding.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        Thread stopping = new Thread(() -> session.stop(Deadline.immediate()), "stopping");
+        try {
+            writeToPeer("hold the IO thread");
+            assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
+            // fewer than the write ring holds: nothing drains it while the IO thread is held
+            for (int i = 0; i < 10; i++) {
+                session.send(ByteBuffer.allocate(Long.BYTES).putLong(i), false);
+            }
+            stopping.start();
+            await().atMost(Duration.ofSeconds(10)).until(() -> stopping.getState() == Thread.State.TIMED_WAITING);
+        } finally {
+            release.countDown();
+        }
+
+        stopping.join(GENEROUS_DEADLINE.toMillis());
+        assertThat(stopping.isAlive()).as("the stop returned").isFalse();
+        assertThat(readUntilClosed(peer).get(10, TimeUnit.SECONDS)).isEqualTo(10 * Long.BYTES);
+        close(peer);
+        close(registeredSocket);
+        CountDownLatch read = new CountDownLatch(1);
+        registerSession((ioSession, message, localReceiveTimeInNanos) -> {
+            message.position(message.limit());
+            read.countDown();
+        });
+        writeToPeer("still running");
+        assertThat(read.await(10, TimeUnit.SECONDS)).as("the IO thread still reads").isTrue();
+    }
+
+    private static CompletableFuture<Integer> readUntilClosed(SocketChannel channel) {
+        return CompletableFuture.supplyAsync(() -> {
+            ByteBuffer in = ByteBuffer.allocate(4096);
+            try {
+                while (channel.read(in) >= 0) {
+                    // until the session closes
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+            return in.position();
+        });
+    }
+
+    /**
+     * A buffer size set before the listener binds turns the kernel's autotuning off, which would otherwise grow the
+     * buffers of a peer that does not read and take writes the test means to leave queued.
+     */
+    private void rebindWithoutReceiveBufferAutotuning() throws IOException {
+        peerListener.close();
+        peerListener = ServerSocketChannel.open();
+        peerListener.setOption(StandardSocketOptions.SO_RCVBUF, SMALL_SOCKET_BUFFER);
+        peerListener.bind(new InetSocketAddress("localhost", 0));
+    }
+
+    /**
+     * Sends until a write stays queued, then a few more behind it.
+     */
+    private static void sendUntilThePeerStopsTakingWrites(IOSession session, AtomicInteger failed) {
+        int chunkBytes = 64 * 1024;
+        for (int chunk = 0; chunk < 1_000; chunk++) {
+            session.send(ByteBuffer.allocate(chunkBytes).position(chunkBytes), null, (message, error, context) -> {
+                if (error != null) {
+                    failed.incrementAndGet();
+                }
+            }, false);
+            if (chunk >= 3 && !session.waitForAllMessagesSent(Deadline.of(Duration.ofMillis(50)))) {
+                return;
+            }
+        }
+        fail("the peer took every write");
     }
 
     @Test

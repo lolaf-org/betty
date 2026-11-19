@@ -190,7 +190,7 @@ class SecureIOSession extends IOSessionImpl {
             connectOnAttach = true;
             handshakeDoneTimeInNanos = localReceiveTimeInNanos;
             setInterestOps(0);
-            if (((IOWorkerImpl) getOwnerWorker()).handOff(this, target)) {
+            if (getOwnerWorker().handOff(this, target)) {
                 return;
             }
             connectOnAttach = false;

@@ -9,6 +9,15 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`IOSession.stop` closes a session whose peer stopped reading once its deadline has passed.** It used to wait 30
+  seconds, log that the IO thread was stuck, and leave the connection open. Messages the socket has not taken by the
+  deadline are now abandoned and reported to their senders as failed. A stop with an immediate deadline still sends
+  everything the peer is reading.
+
 ## [0.9.4] - 2026-11-16
 
 ### Added

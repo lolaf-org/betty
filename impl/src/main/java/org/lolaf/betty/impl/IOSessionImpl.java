@@ -128,7 +128,7 @@ class IOSessionImpl implements IOSession {
     private boolean disconnectionAfterRead;
     private boolean paused;
     @Getter(AccessLevel.PACKAGE)
-    private IOWorker ownerWorker;
+    private IOWorkerImpl ownerWorker;
 
     public IOSessionImpl(boolean clientSession, SocketChannel socket, BaseBuilder baseBuilder, IOSettings ioSettings, RemoteSessionsFilter remoteSessionsFilter,
                          IOBufferPool sharedIOBufferPool, IOWorkersGroupSettings ioWorkersGroupSettings) {
@@ -379,7 +379,7 @@ class IOSessionImpl implements IOSession {
     void attachToIOWorker(Selector selector, SelectStrategy selectStrategy, Consumer<IOSession> sessionStoppedConsumer,
                           Consumer<IOSession> tasksRingBufferFullConsumer, Consumer<IOSession> writesRingBufferFullConsumer,
                           Thread ioWorkerThread, IOWorker ioWorker) throws IOException {
-        this.ownerWorker = ioWorker;
+        this.ownerWorker = (IOWorkerImpl) ioWorker;
         this.sessionStoppedConsumer = sessionStoppedConsumer;
         this.ioThreadTaskRequestsRetryStrategy = getRetryStrategy(tasksRingBufferFullConsumer);
         this.ioThreadSocketWriteRequestsRetryStrategy = getRetryStrategy(writesRingBufferFullConsumer);
@@ -494,8 +494,58 @@ class IOSessionImpl implements IOSession {
             disconnectionAfterRead = true;
             return;
         }
+        if (isWithinIOThread()) {
+            disconnect();
+            return;
+        }
         CountDownLatch disconnection = new CountDownLatch(1);
-        processTask(() -> {
+        if (ownerWorker == null || !ownerWorker.submitDisconnection(this, disconnection)) {
+            queueDisconnection(disconnection);
+        }
+        // two IO threads each waiting for the other to disconnect one of its sessions would never wake up
+        if (IOWorkerImpl.isIOWorkerThread()) {
+            return;
+        }
+        try {
+            if (!disconnection.await(DISCONNECTION_TIMEOUT_IN_SECONDS, TimeUnit.SECONDS)) {
+                log.error("IOSession {} not disconnected within {}s, its IO thread {} is stuck, the session stays open until it"
+                        + " runs the disconnection", id, DISCONNECTION_TIMEOUT_IN_SECONDS, ioWorkerThread.getName());
+            }
+        } catch (InterruptedException e) {
+            // the disconnection stays queued and the IO thread still runs it
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Runs {@link #stop}'s disconnection from the worker's command queue, which runs whatever the socket's state, unlike
+     * the session's own queue: writes what the socket still takes, then disconnects, abandoning the rest. IO thread only.
+     */
+    void flushThenDisconnect(CountDownLatch disconnection) {
+        try {
+            while (connectionState != ConnectionState.DISCONNECTED && hasUnsentMessages()) {
+                int queued = ioThreadRequests.getSize();
+                int halfOut = pendingWriteRemaining();
+                onOperationWrite();
+                if (ioThreadRequests.getSize() >= queued && pendingWriteRemaining() >= halfOut) {
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            log.info("IOSession {} failed to write before its disconnection", id, e);
+        } finally {
+            disconnect();
+            disconnection.countDown();
+        }
+    }
+
+    /**
+     * The disconnection queued behind the session's writes: the fallback when the worker cannot take the command, and
+     * the one way that follows the session through a migration. Never run in place, even from the IO thread the
+     * session last had: a migrating session belongs to the worker it is moving to.
+     */
+    void queueDisconnection(CountDownLatch disconnection) {
+        enqueueTask(() -> {
             try {
                 disconnect();
             } finally {
@@ -507,19 +557,6 @@ class IOSessionImpl implements IOSession {
             }
             disconnection.countDown();
         });
-        // two IO threads each waiting for the other to disconnect one of its sessions would never wake up
-        if (disconnection.getCount() == 0 || IOWorkerImpl.isIOWorkerThread()) {
-            return;
-        }
-        try {
-            if (!disconnection.await(DISCONNECTION_TIMEOUT_IN_SECONDS, TimeUnit.SECONDS)) {
-                log.error("IOSession {} not disconnected within {}s, its IO thread {} is stuck, the session stays open until it"
-                        + " runs the disconnection", id, DISCONNECTION_TIMEOUT_IN_SECONDS, ioWorkerThread.getName());
-            }
-        } catch (InterruptedException e) {
-            // the task stays queued and the IO thread still runs it
-            Thread.currentThread().interrupt();
-        }
     }
 
     @Override
@@ -623,6 +660,10 @@ class IOSessionImpl implements IOSession {
             executeTask(task, callback);
             return;
         }
+        enqueueTask(task, callback);
+    }
+
+    private void enqueueTask(Runnable task, BiConsumer<Runnable, Exception> callback) {
         if (!ioThreadRequests.offerRetrying(translateTask, task, callback, ioThreadTaskRequestsRetryStrategy)) {
             callback.accept(task, new EOFException("Cannot process IOTask on disconnected session " + id));
             return;
@@ -1026,6 +1067,11 @@ class IOSessionImpl implements IOSession {
         // last, and not before the cancelled writes above: their callbacks are handed the very buffers this pool
         // owns, and on a direct pool that memory is freed here, not garbage collected
         releasePooledBuffers();
+    }
+
+    private int pendingWriteRemaining() {
+        ByteBuffer pendingWritesOut = pendingWrite.byteBuffer;
+        return pendingWritesOut == null ? 0 : pendingWritesOut.remaining();
     }
 
     private void safelyProcessCallbackOnDisconnection(IOThreadRequest threadRequest) {

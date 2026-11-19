@@ -255,6 +255,29 @@ class SlowConsumerBackPressureTest extends AbstractTest {
         assertThat(serverClientIOsession.isStarted()).isTrue();
     }
 
+    /**
+     * The disconnection runs from the worker's command queue, which does not wait for the socket: over TLS too, where
+     * what is left to write sits in the encrypted buffer rather than the message.
+     */
+    @ParameterizedTest
+    @MethodSource("getTestParams")
+    void aStopClosesWithinItsDeadlineASessionWhosePeerStoppedReading(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
+        WriteFailureCountingListener serverListener = new WriteFailureCountingListener();
+        setupTestEnvAndWaitForConnections(
+                clientBuilder.toBuilder().ioEventsListener(new TestIOEventsListener()).ioSettings(consumerSettings()).build(),
+                serverBuilder.toBuilder().ioEventsListener(serverListener).ioSettings(producerSettings()).build());
+        clientIOsession.pause(Deadline.immediate());
+        sendChunks(serverClientIOsession);
+        await().untilAsserted(() -> assertThat(serverListener.getHighWatermarkEvents()).hasPositiveValue());
+
+        long start = System.nanoTime();
+        serverClientIOsession.stop(Deadline.of(Duration.ofMillis(200)));
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(5));
+        assertThat(serverListener.isConnected()).as("disconnected when stop returns").isFalse();
+        assertThat(serverListener.getWriteFailures()).as("the writes left are reported failed").hasPositiveValue();
+    }
+
     private static final class SocketWriteRecorder implements IOStats {
 
         @Getter
@@ -294,6 +317,17 @@ class SlowConsumerBackPressureTest extends AbstractTest {
             } else {
                 lowWatermarkEvents.incrementAndGet();
             }
+        }
+    }
+
+    @Getter
+    private static final class WriteFailureCountingListener extends WatermarkListener {
+
+        private final AtomicInteger writeFailures = new AtomicInteger();
+
+        @Override
+        public void onWriteFailure(IOSession session, ByteBuffer message) {
+            writeFailures.incrementAndGet();
         }
     }
 
