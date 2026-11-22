@@ -363,6 +363,12 @@ class SecureIOSession extends IOSessionImpl {
         return encodedBytesPending;
     }
 
+    @Override
+    void discardUnflushedWrite() {
+        encodingWriteBuffer.clear();
+        encodedBytesPending = false;
+    }
+
     private int flushEncodedBytes() throws IOException {
         if (!encodedBytesPending) {
             if (encodingWriteBuffer.position() == 0) {

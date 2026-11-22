@@ -27,15 +27,18 @@ import org.lolaf.betty.api.settings.IOSettings;
 import org.lolaf.betty.api.stats.IOStats;
 import org.lolaf.ringos.Deadline;
 
+import java.io.IOException;
 import java.net.SocketOption;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -181,6 +184,44 @@ class SlowConsumerBackPressureTest extends AbstractTest {
             assertThat(context.releases).hasValue(1);
         });
         assertThat(clientListener.getCorruption()).isNull();
+    }
+
+    /**
+     * Over TLS a half-written message also leaves part of a record unflushed, and a failed write that kept it counted
+     * the message as still pending, so the disconnect reported it again and released its context a second time.
+     */
+    @ParameterizedTest
+    @MethodSource("getTestParams")
+    void aWriteThatFailsHalfwayIsReportedFailedOnce(ClientBuilder clientBuilder, ServerBuilder serverBuilder) {
+        setupTestEnvAndWaitForConnections(
+                clientBuilder.toBuilder().ioEventsListener(new TestIOEventsListener()).ioSettings(consumerSettings()).build(),
+                serverBuilder.toBuilder().ioEventsListener(new TestIOEventsListener()).ioSettings(producerSettings()).build());
+        IOSessionImpl session = (IOSessionImpl) serverClientIOsession;
+
+        clientIOsession.pause(Deadline.immediate());
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicReference<Exception> reportedError = new AtomicReference<>();
+        CountingContext context = new CountingContext();
+        // with its write half shut, the socket is reported writable and the resumed write fails
+        session.processTask(() -> {
+            session.send(chunk(session, new AtomicLong(), PARTIAL_WRITE_CHUNK_SIZE), context,
+                    (message, sendingError, sendingContext) -> {
+                        callbacks.incrementAndGet();
+                        reportedError.set(sendingError);
+                    }, true);
+            try {
+                session.getSocket().shutdownOutput();
+            } catch (IOException ex) {
+                throw new IllegalStateException(ex);
+            }
+        });
+
+        await().untilAsserted(() -> assertThat(callbacks).hasValue(1));
+        assertThat(reportedError.get()).isInstanceOf(ClosedChannelException.class);
+        await().during(Duration.ofMillis(500)).untilAsserted(() -> {
+            assertThat(callbacks).hasValue(1);
+            assertThat(context.releases).hasValue(1);
+        });
     }
 
     @ParameterizedTest

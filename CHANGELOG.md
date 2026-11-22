@@ -17,6 +17,9 @@ matching `[x.y.z]:` link definition at the foot of the file.
   seconds, log that the IO thread was stuck, and leave the connection open. Messages the socket has not taken by the
   deadline are now abandoned and reported to their senders as failed. A stop with an immediate deadline still sends
   everything the peer is reading.
+- **A TLS write that fails partway through a message is reported failed once.** When the connection dropped while a
+  message was half written, its callback ran a second time on disconnect and its `ReleasableMessageSendingContext` was
+  released twice, so a pooled context could end up shared by two later messages.
 
 ## [0.9.4] - 2026-11-16
 

@@ -908,6 +908,7 @@ class IOSessionImpl implements IOSession {
         try {
             bytesWritten = resuming ? continueWriteToSocket(bufferOut) : writeToSocket(bufferOut);
         } catch (IOException ex) {
+            discardUnflushedWrite();
             reportWriteFailure(request, ex);
             throw ex;
         }
@@ -997,6 +998,13 @@ class IOSessionImpl implements IOSession {
      */
     boolean hasUnflushedWrite() {
         return false;
+    }
+
+    /**
+     * Drops what {@link #hasUnflushedWrite()} counts once its write has failed: kept, it would keep that message
+     * pending after it is reported, and the disconnect would report it and release its context a second time.
+     */
+    void discardUnflushedWrite() {
     }
 
     private boolean isFullyWritten(ByteBuffer bufferOut) {
