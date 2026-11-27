@@ -28,6 +28,7 @@ import org.lolaf.betty.api.io.IOSessionTag;
 import org.lolaf.betty.api.settings.IOSettings;
 import org.lolaf.betty.api.stats.IOStats;
 import org.lolaf.ringos.Deadline;
+import org.mockito.ArgumentCaptor;
 
 import java.io.EOFException;
 import java.net.InetSocketAddress;
@@ -600,5 +601,9 @@ class ClientImplTest extends AbstractTest {
         verify(serverIoEventsListener, never()).onShutdown(any());
         verify(serverStats, never()).onSessionOpened(any());
         verify(serverStats, never()).onSessionClosed(any());
+        ArgumentCaptor<IOSession> rejected = ArgumentCaptor.forClass(IOSession.class);
+        verify(serverIoEventsListener).onDisconnected(rejected.capture());
+        assertThat(rejected.getValue().stop(Deadline.immediate()).toCompletableFuture()).as("already disconnected")
+                .succeedsWithin(Duration.ofSeconds(10));
     }
 }

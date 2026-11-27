@@ -43,6 +43,7 @@ import java.time.Duration;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -109,6 +110,8 @@ class IOSessionImpl implements IOSession {
     private final CpuTimeStats cpuTimeStats;
     private final RingBuffer.EventTranslatorTwoArg<IOThreadRequest, Runnable, BiConsumer<Runnable, Exception>> translateTask;
     private final IOWriter inactiveIOWriter;
+    private final CompletableFuture<Void> disconnected;
+    private final CompletionStage<Void> whenDisconnected;
     private volatile ConnectionState connectionState;
     private boolean insideWriteCycle;
     private Consumer<IOSession> sessionStoppedConsumer;
@@ -152,6 +155,8 @@ class IOSessionImpl implements IOSession {
         this.orderedWrites = ioSettings.isOrderedWrites();
         this.translateTask = this::translateTask;
         this.inactiveIOWriter = new InactiveIOWriter();
+        this.disconnected = new CompletableFuture<>();
+        this.whenDisconnected = disconnected.minimalCompletionStage();
         // ordered writes make the IO thread queue its own messages, and so a producer of the ring on top of whichever
         // application threads write to the session
         this.ioThreadRequests = ioSettings.isMultiThreadedWriteAPICalls() || orderedWrites
@@ -467,7 +472,7 @@ class IOSessionImpl implements IOSession {
     }
 
     @Override
-    public void stop(Deadline flushOutgoingMessagesDeadline) {
+    public CompletionStage<Void> stop(Deadline flushOutgoingMessagesDeadline) {
         if (started.getAndSet(false)) {
             // immediately stop reads
             if (hasActiveSelectionKey()) {
@@ -488,6 +493,7 @@ class IOSessionImpl implements IOSession {
             tags.clear();
             generateTagsArray();
         }
+        return whenDisconnected;
     }
 
     protected boolean hasActiveSelectionKey() {
@@ -567,6 +573,8 @@ class IOSessionImpl implements IOSession {
         }, (task, error) -> {
             if (connectionState != ConnectionState.DISCONNECTED) {
                 log.error("IOSession {} has no IO thread left, it will not be disconnected", id);
+                disconnected.completeExceptionally(new IllegalStateException("IOSession " + id
+                        + " has no IO thread left: it was not disconnected, and none of its callbacks runs again"));
             }
             disconnection.countDown();
         });
@@ -1083,11 +1091,15 @@ class IOSessionImpl implements IOSession {
             }
         });
         ioThreadRequests.clear();
-        ioEventsListener.onDisconnected(this);
-        activeIOStats.onSessionClosed(this);
-        // last, and not before the cancelled writes above: their callbacks are handed the very buffers this pool
-        // owns, and on a direct pool that memory is freed here, not garbage collected
-        releasePooledBuffers();
+        try {
+            ioEventsListener.onDisconnected(this);
+            activeIOStats.onSessionClosed(this);
+            // last, and not before the cancelled writes above: their callbacks are handed the very buffers this pool
+            // owns, and on a direct pool that memory is freed here, not garbage collected
+            releasePooledBuffers();
+        } finally {
+            disconnected.complete(null);
+        }
     }
 
     private int pendingWriteRemaining() {
@@ -1112,8 +1124,12 @@ class IOSessionImpl implements IOSession {
         } catch (IOException e) {
             log.info("Failed to close socket on IOSession {}", id, e);
         }
-        ioEventsListener.onDisconnected(this);
-        releasePooledBuffers();
+        try {
+            ioEventsListener.onDisconnected(this);
+            releasePooledBuffers();
+        } finally {
+            disconnected.complete(null);
+        }
     }
 
     void releasePooledBuffers() {

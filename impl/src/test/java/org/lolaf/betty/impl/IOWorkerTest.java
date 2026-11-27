@@ -483,20 +483,59 @@ class IOWorkerTest {
                 disconnected.countDown();
             }
         });
+        CompletableFuture<Void> disconnection;
         try {
             writeToPeer("hold the IO thread");
             assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
 
             long start = System.nanoTime();
-            session.stop(Deadline.of(Duration.ofMillis(200)));
+            disconnection = session.stop(Deadline.of(Duration.ofMillis(200))).toCompletableFuture();
 
             assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(GENEROUS_DEADLINE);
             assertThat(disconnected.getCount()).as("still held").isOne();
+            assertThat(disconnection).isNotDone();
         } finally {
             release.countDown();
         }
-        assertThat(disconnected.await(10, TimeUnit.SECONDS)).as("disconnected once released").isTrue();
+        assertThat(disconnection).succeedsWithin(Duration.ofSeconds(10));
+        assertThat(disconnected.getCount()).isZero();
         assertThat(registeredSocket.isOpen()).isFalse();
+    }
+
+    @Test
+    void theStageAStopReturnsCompletesOnTheIOThreadOnceOnDisconnectedReturned() throws Exception {
+        startWorker("disconnection-worker");
+        AtomicReference<Thread> disconnectedOn = new AtomicReference<>();
+        AtomicBoolean onDisconnectedReturned = new AtomicBoolean();
+        CountDownLatch dependentAdded = new CountDownLatch(1);
+        IOSession session = registerSession(new CountingListener() {
+            @Override
+            public void onDisconnected(IOSession ioSession) {
+                disconnectedOn.set(Thread.currentThread());
+                try {
+                    dependentAdded.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                onDisconnectedReturned.set(true);
+            }
+        });
+        AtomicReference<Thread> completedOn = new AtomicReference<>();
+        AtomicBoolean afterOnDisconnected = new AtomicBoolean();
+        CompletableFuture<Void> released;
+        try {
+            released = session.stop(Deadline.immediate()).thenRun(() -> {
+                completedOn.set(Thread.currentThread());
+                afterOnDisconnected.set(onDisconnectedReturned.get());
+            }).toCompletableFuture();
+            assertThat(released).as("onDisconnected still running").isNotDone();
+        } finally {
+            dependentAdded.countDown();
+        }
+
+        assertThat(released).succeedsWithin(Duration.ofSeconds(10));
+        assertThat(afterOnDisconnected).isTrue();
+        assertThat(completedOn.get()).as("the IO thread").isSameAs(disconnectedOn.get());
     }
 
     private static CompletableFuture<Integer> readUntilClosed(SocketChannel channel) {

@@ -20,6 +20,7 @@ import org.lolaf.ringos.Deadline;
 
 import java.net.InetSocketAddress;
 import java.nio.channels.NetworkChannel;
+import java.util.concurrent.CompletionStage;
 import java.util.function.BiConsumer;
 
 /**
@@ -130,6 +131,12 @@ public interface IOSession extends IOWriter {
      * error is logged and the session stays open until that thread gets to it. Called from an IO thread, it does not
      * wait.
      * <p>
+     * The stage it returns completes once {@link IOEventsListener#onDisconnected} has returned: no callback for the
+     * session runs after it. Free what the callbacks use (a store, a codec) from there, not as soon as this returns: a
+     * stop returns at its deadline while a busy IO thread may still be in a callback. A dependent added before
+     * completion runs on the IO thread, so hand slow work to an executor. It completes exceptionally if the session lost
+     * its IO thread without being disconnected, its callbacks being over all the same.
+     * <p>
      * Called from {@link IOEventsListener#onRead}, the connection closes once {@code onRead} returns: the rest of that
      * callback still runs on an open session, {@link IOEventsListener#onDisconnected} is never called from inside it,
      * and {@code onRead} is not called again, not even for TLS records that arrived in the same read.
@@ -138,8 +145,9 @@ public interface IOSession extends IOWriter {
      * stopped reading does not keep the session open.
      *
      * @param stopDeadline time to wait for flushing all message to be sent before closing the session
+     * @return the session's disconnection, the same stage on every call, also once already stopped or disconnected
      */
-    void stop(Deadline stopDeadline);
+    CompletionStage<Void> stop(Deadline stopDeadline);
 
     /**
      * Whether the session is started.

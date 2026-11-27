@@ -11,6 +11,14 @@ matching `[x.y.z]:` link definition at the foot of the file.
 
 ## [0.9.6] - 2026-11-27
 
+### Added
+
+- **`IOSession.stop` returns a `CompletionStage`** that completes once the session is disconnected and `onDisconnected`
+  has returned. No callback for that session runs after it, so this is the moment to release what your listener uses,
+  even when `stop` returned before the session was closed. Calling `stop` again, or on a session already disconnected,
+  returns the same stage. It completes on the IO thread: hand slow work to an executor. Code calling `stop` needs
+  recompiling, and code implementing `IOSession` must return the stage.
+
 ### Fixed
 
 - **`IOSession.stop` no longer takes 30 seconds when the IO thread is held in application code.** Called from outside
