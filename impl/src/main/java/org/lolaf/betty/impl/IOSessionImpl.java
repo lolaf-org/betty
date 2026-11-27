@@ -586,6 +586,11 @@ class IOSessionImpl implements IOSession {
     }
 
     @Override
+    public CompletionStage<Void> whenDisconnected() {
+        return whenDisconnected;
+    }
+
+    @Override
     public boolean isConnected() {
         return connectionState == ConnectionState.CONNECTED;
     }

@@ -75,9 +75,9 @@ public interface IOEventsListener {
     /**
      * The session is disconnected, whoever closed it: the peer, an error, or {@link IOSession#stop}, possibly after that
      * stop returned because its deadline passed. Called on the IO thread, never from inside {@link #onRead}, and the
-     * last callback for the session. This is where the listener reacts to the connection going away; code that stops
-     * a session and must free what these callbacks use waits instead for the stage {@link IOSession#stop} returns,
-     * which completes right after this returns and belongs to that one session.
+     * last callback for the session. This is where the listener reacts to the connection going away; code that must
+     * free what these callbacks use waits instead for {@link IOSession#whenDisconnected()}, which completes right after
+     * this returns and belongs to that one session.
      *
      * @param session the session, or null when a connection attempt failed before a session existed
      */

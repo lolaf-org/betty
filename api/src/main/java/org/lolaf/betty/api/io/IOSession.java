@@ -131,11 +131,8 @@ public interface IOSession extends IOWriter {
      * error is logged and the session stays open until that thread gets to it. Called from an IO thread, it does not
      * wait.
      * <p>
-     * The stage it returns completes once {@link IOEventsListener#onDisconnected} has returned: no callback for the
-     * session runs after it. Free what the callbacks use (a store, a codec) from there, not as soon as this returns: a
-     * stop returns at its deadline while a busy IO thread may still be in a callback. A dependent added before
-     * completion runs on the IO thread, so hand slow work to an executor. It completes exceptionally if the session lost
-     * its IO thread without being disconnected, its callbacks being over all the same.
+     * It returns {@link #whenDisconnected()}: free what the callbacks use (a store, a codec) from there, not as soon as
+     * this returns, since a stop returns at its deadline while a busy IO thread may still be in a callback.
      * <p>
      * Called from {@link IOEventsListener#onRead}, the connection closes once {@code onRead} returns: the rest of that
      * callback still runs on an open session, {@link IOEventsListener#onDisconnected} is never called from inside it,
@@ -145,7 +142,7 @@ public interface IOSession extends IOWriter {
      * stopped reading does not keep the session open.
      *
      * @param stopDeadline time to wait for flushing all message to be sent before closing the session
-     * @return the session's disconnection, the same stage on every call, also once already stopped or disconnected
+     * @return {@link #whenDisconnected()}, also once already stopped or disconnected
      */
     CompletionStage<Void> stop(Deadline stopDeadline);
 
@@ -164,6 +161,18 @@ public interface IOSession extends IOWriter {
      * {@link IOEventsListener#onDisconnected(IOSession)}
      */
     boolean isConnected();
+
+    /**
+     * Completes once {@link IOEventsListener#onDisconnected} has returned for this session: no callback for it runs
+     * after that, however the connection closed. Unlike the same stage {@link #stop(Deadline)} returns, it stops
+     * nothing: take it when the session connects to learn when what its callbacks use can be freed, even if the peer
+     * or an error closes it and nobody calls {@code stop}. A dependent added before completion runs on the IO thread:
+     * hand slow work to an executor. Completes exceptionally if the session lost its IO thread without being
+     * disconnected, its callbacks being over all the same.
+     *
+     * @return the same stage on every call, one per connection
+     */
+    CompletionStage<Void> whenDisconnected();
 
     /**
      * Runs a task on the session's IO thread, immediately if the caller is already on it. From any other thread

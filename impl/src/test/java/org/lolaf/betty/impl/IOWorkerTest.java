@@ -503,6 +503,28 @@ class IOWorkerTest {
     }
 
     @Test
+    void whenDisconnectedCompletesOnceThePeerClosedTheConnectionWithoutAStop() throws Exception {
+        startWorker("peer-close-worker");
+        AtomicBoolean onDisconnectedReturned = new AtomicBoolean();
+        IOSession session = registerSession(new CountingListener() {
+            @Override
+            public void onDisconnected(IOSession ioSession) {
+                onDisconnectedReturned.set(true);
+            }
+        });
+        AtomicBoolean afterOnDisconnected = new AtomicBoolean();
+        CompletableFuture<Void> released = session.whenDisconnected()
+                .thenRun(() -> afterOnDisconnected.set(onDisconnectedReturned.get())).toCompletableFuture();
+        assertThat(released).isNotDone();
+
+        close(peer);
+
+        assertThat(released).succeedsWithin(Duration.ofSeconds(10));
+        assertThat(afterOnDisconnected).isTrue();
+        assertThat(session.stop(Deadline.immediate()).toCompletableFuture()).as("the same stage").isDone();
+    }
+
+    @Test
     void theStageAStopReturnsCompletesOnTheIOThreadOnceOnDisconnectedReturned() throws Exception {
         startWorker("disconnection-worker");
         AtomicReference<Thread> disconnectedOn = new AtomicReference<>();
