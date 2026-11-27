@@ -9,6 +9,16 @@ cut: the release workflow refuses to run without one, and the GitHub Release for
 with that section as its body. Write it in the commit that precedes the release, together with the
 matching `[x.y.z]:` link definition at the foot of the file.
 
+## [0.9.6] - 2026-11-27
+
+### Fixed
+
+- **`IOSession.stop` no longer takes 30 seconds when the IO thread is held in application code.** Called from outside
+  the IO thread while a listener callback blocked, it waited 30 seconds for the disconnection whatever its deadline. As
+  before 0.9.2, it now waits until the deadline, at least 100 ms, then returns and logs that the IO thread is busy or
+  stuck; the session still closes once that thread is free, or when its IO worker stops. A stop with an immediate
+  deadline therefore no longer blocks until a held IO thread lets go: it may return while the session is still open.
+
 ## [0.9.5] - 2026-11-23
 
 ### Fixed
@@ -183,6 +193,7 @@ depends on [ringos](https://github.com/lolaf-org/ringos) and SLF4J and nothing e
   not time an operation returns a constant and no clock call is made for it, so measurement is genuinely free when it
   is off. A receive timestamp is handed to `onRead` under its own setting.
 
+[0.9.6]: https://github.com/lolaf-org/betty/releases/tag/v0.9.6
 [0.9.5]: https://github.com/lolaf-org/betty/releases/tag/v0.9.5
 [0.9.4]: https://github.com/lolaf-org/betty/releases/tag/v0.9.4
 [0.9.3]: https://github.com/lolaf-org/betty/releases/tag/v0.9.3

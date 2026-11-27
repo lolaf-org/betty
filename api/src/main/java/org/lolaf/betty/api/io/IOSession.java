@@ -125,9 +125,10 @@ public interface IOSession extends IOWriter {
     /**
      * Stops the io Session.
      * <p>
-     * The disconnection runs on the session's IO thread and, called from outside any IO thread, this waits for it up
-     * to 30 seconds: past that the IO thread is stuck in application code, an error is logged and the session stays
-     * open until that thread gets to it. Called from an IO thread, it does not wait.
+     * The disconnection runs on the session's IO thread and, called from outside any IO thread, this waits for it until
+     * the deadline, at least 100 ms and at most 30 seconds: past that the IO thread is stuck in application code, an
+     * error is logged and the session stays open until that thread gets to it. Called from an IO thread, it does not
+     * wait.
      * <p>
      * Called from {@link IOEventsListener#onRead}, the connection closes once {@code onRead} returns: the rest of that
      * callback still runs on an open session, {@link IOEventsListener#onDisconnected} is never called from inside it,

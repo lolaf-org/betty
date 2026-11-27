@@ -439,13 +439,12 @@ class IOWorkerTest {
                 session.send(ByteBuffer.allocate(Long.BYTES).putLong(i), false);
             }
             stopping.start();
-            await().atMost(Duration.ofSeconds(10)).until(() -> stopping.getState() == Thread.State.TIMED_WAITING);
+            stopping.join(GENEROUS_DEADLINE.toMillis());
+            assertThat(stopping.isAlive()).as("the stop returned while the IO thread is held").isFalse();
         } finally {
             release.countDown();
         }
 
-        stopping.join(GENEROUS_DEADLINE.toMillis());
-        assertThat(stopping.isAlive()).as("the stop returned").isFalse();
         assertThat(readUntilClosed(peer).get(10, TimeUnit.SECONDS)).isEqualTo(10 * Long.BYTES);
         close(peer);
         close(registeredSocket);
@@ -456,6 +455,48 @@ class IOWorkerTest {
         });
         writeToPeer("still running");
         assertThat(read.await(10, TimeUnit.SECONDS)).as("the IO thread still reads").isTrue();
+    }
+
+    /**
+     * The stop used to wait 30 seconds for an IO thread held in {@code onRead}, whatever its deadline.
+     */
+    @Test
+    void aStopFromOutsideReturnsSoonAfterItsDeadlineWhileTheIOThreadIsHeld() throws Exception {
+        startWorker("held-worker");
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch disconnected = new CountDownLatch(1);
+        IOSession session = registerSession(new IOEventsListener() {
+            @Override
+            public void onRead(IOSession ioSession, ByteBuffer message, long localReceiveTimeInNanos) {
+                message.position(message.limit());
+                holding.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            @Override
+            public void onDisconnected(IOSession ioSession) {
+                disconnected.countDown();
+            }
+        });
+        try {
+            writeToPeer("hold the IO thread");
+            assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
+
+            long start = System.nanoTime();
+            session.stop(Deadline.of(Duration.ofMillis(200)));
+
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(GENEROUS_DEADLINE);
+            assertThat(disconnected.getCount()).as("still held").isOne();
+        } finally {
+            release.countDown();
+        }
+        assertThat(disconnected.await(10, TimeUnit.SECONDS)).as("disconnected once released").isTrue();
+        assertThat(registeredSocket.isOpen()).isFalse();
     }
 
     private static CompletableFuture<Integer> readUntilClosed(SocketChannel channel) {
@@ -586,14 +627,13 @@ class IOWorkerTest {
             await().atMost(Duration.ofSeconds(10)).until(() -> worker.getRegisteredSessionsCount() == 0);
             Thread stopper = new Thread(() -> migrating.stop(Deadline.immediate()), "migrating-session-stopper");
             stopper.start();
-            await().atMost(Duration.ofSeconds(10)).until(() -> stopper.getState() == Thread.State.TIMED_WAITING);
+            stopper.join(10_000);
+            assertThat(stopper.isAlive()).as("stop returned").isFalse();
             assertThat(disconnected.getCount()).as("the detached session waits for its target worker").isEqualTo(1);
 
             release.countDown();
 
-            stopper.join(10_000);
-            assertThat(stopper.isAlive()).as("stop returned").isFalse();
-            assertThat(disconnected.getCount()).isZero();
+            assertThat(disconnected.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(disconnectedOn.get()).as("disconnected on the target IO thread").isSameAs(targetThread.get());
             assertThat(migration).isCompleted();
             assertThat(peer.read(ByteBuffer.allocate(1))).as("the peer sees the socket closed").isEqualTo(-1);

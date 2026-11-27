@@ -39,6 +39,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -61,9 +62,15 @@ class IOSessionImpl implements IOSession {
     private static final Thread NO_IO_THREAD = new Thread(() -> {
     }, "no-io-thread");
     /**
-     * Only an IO thread stuck in application code takes this long; past it, {@link #stop} returns rather than hang.
+     * The least {@link #stop} waits for the IO thread to disconnect, even past its deadline: a free IO thread needs a
+     * moment to run the disconnection.
      */
-    private static final long DISCONNECTION_TIMEOUT_IN_SECONDS = 30L;
+    private static final Duration MIN_WAIT_FOR_DISCONNECTION = Duration.ofMillis(100);
+    /**
+     * The most {@link #stop} waits for the IO thread to disconnect, whatever its deadline: an unlimited one would hang
+     * on an IO thread stuck in application code.
+     */
+    private static final Duration MAX_WAIT_FOR_DISCONNECTION = Duration.ofSeconds(30);
 
     private static final BiConsumer<Runnable, Exception> DEFAULT_TASK_CALLBACK = (t, e) -> {
         if (e != null) {
@@ -474,7 +481,7 @@ class IOSessionImpl implements IOSession {
                 LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
                 // unfortunately we have to wait for OS to flush last message IO even if queue is empty
             }
-            disconnectOnIOThread();
+            disconnectOnIOThread(flushOutgoingMessagesDeadline);
             if (sessionStoppedConsumer != null) {
                 sessionStoppedConsumer.accept(this);
             }
@@ -487,7 +494,7 @@ class IOSessionImpl implements IOSession {
         return selectionKey != null && selectionKey.isValid();
     }
 
-    private void disconnectOnIOThread() {
+    private void disconnectOnIOThread(Deadline stopDeadline) {
         // the listener is still handling what it read: closing now would call onDisconnected from inside its onRead
         // and release buffers it may still be using
         if (processingReadOperation && isWithinIOThread()) {
@@ -506,10 +513,16 @@ class IOSessionImpl implements IOSession {
         if (IOWorkerImpl.isIOWorkerThread()) {
             return;
         }
+        Duration wait = stopDeadline.getRemainingTime();
+        if (wait.compareTo(MIN_WAIT_FOR_DISCONNECTION) < 0) {
+            wait = MIN_WAIT_FOR_DISCONNECTION;
+        } else if (wait.compareTo(MAX_WAIT_FOR_DISCONNECTION) > 0) {
+            wait = MAX_WAIT_FOR_DISCONNECTION;
+        }
         try {
-            if (!disconnection.await(DISCONNECTION_TIMEOUT_IN_SECONDS, TimeUnit.SECONDS)) {
-                log.error("IOSession {} not disconnected within {}s, its IO thread {} is stuck, the session stays open until it"
-                        + " runs the disconnection", id, DISCONNECTION_TIMEOUT_IN_SECONDS, ioWorkerThread.getName());
+            if (!disconnection.await(wait.toNanos(), TimeUnit.NANOSECONDS)) {
+                log.error("IOSession {} not disconnected within {} ms, its IO thread {} is busy or stuck, the session stays open"
+                        + " until it runs the disconnection", id, wait.toMillis(), ioWorkerThread.getName());
             }
         } catch (InterruptedException e) {
             // the disconnection stays queued and the IO thread still runs it
