@@ -5,7 +5,6 @@
     <parent>
         <groupId>org.lolaf.betty</groupId>
         <artifactId>betty-parent</artifactId>
-        next development
         <version>0.9.6-SNAPSHOT</version>
     </parent>
 
